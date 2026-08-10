@@ -22,6 +22,18 @@ describe('parseVtt', () => {
   it('ignores malformed cues rather than throwing', () => {
     expect(parseVtt('WEBVTT\n\ngarbage\n')).toEqual([]);
   });
+  it('correctly converts timestamps with hours', () => {
+    const vttWithHours = `WEBVTT
+
+01:23:45.500 --> 02:10:30.250
+Long video segment
+`;
+    const s = parseVtt(vttWithHours);
+    expect(s).toHaveLength(1);
+    // 1h 23m 45.5s = 3600 + 1380 + 45.5 = 5025.5
+    // 2h 10m 30.25s = 7200 + 600 + 30.25 = 7830.25
+    expect(s[0]).toEqual({ start: 5025.5, end: 7830.25, text: 'Long video segment' });
+  });
 });
 
 describe('chooseCaptionTier', () => {
