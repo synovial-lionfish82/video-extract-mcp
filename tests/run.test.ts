@@ -15,8 +15,10 @@ describe('run', () => {
     await expect(run('definitely-not-a-real-binary-xyz', [])).rejects.toThrow();
   });
   it('handles multi-byte UTF-8 correctly across chunk boundaries', async () => {
-    // Emit a large amount of CJK text to force chunk boundaries during streaming
-    const cjkText = '你好世界'.repeat(5000);
+    // Emit 120,000 bytes of CJK text to force chunk boundaries at exactly 65,536 bytes.
+    // At this size, data arrives as 2 chunks with the split landing mid-character.
+    // This payload will produce U+FFFD replacement characters if decoded as separate chunks.
+    const cjkText = '你好世界'.repeat(10000);
     const r = await run('echo', [cjkText]);
     expect(r.code).toBe(0);
     // Verify no replacement characters from botched UTF-8 decoding
