@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 const pexec = promisify(execFile);
 
@@ -11,9 +12,14 @@ export interface BinaryStatus {
   note?: string;
 }
 
-export function parseVersion(raw: string): string {
+export interface ParsedVersion {
+  version: string | null;
+  matched: boolean;
+}
+
+export function parseVersion(raw: string): ParsedVersion {
   const m = raw.match(/\d+(?:\.\d+)+/);
-  return m ? m[0] : raw.trim();
+  return m ? { version: m[0], matched: true } : { version: null, matched: false };
 }
 
 export async function checkBinary(
@@ -22,7 +28,8 @@ export async function checkBinary(
 ): Promise<BinaryStatus> {
   try {
     const { stdout } = await pexec(name, [versionArg]);
-    return { name, present: true, version: parseVersion(stdout), ok: true };
+    const parsed = parseVersion(stdout);
+    return { name, present: true, version: parsed.version, ok: parsed.matched };
   } catch (err: unknown) {
     // Some binaries (like ffmpeg) output version to stderr, not stdout.
     // Check if we have stderr content from the error.
@@ -33,7 +40,11 @@ export async function checkBinary(
       typeof err.stderr === 'string' &&
       err.stderr.length > 0
     ) {
-      return { name, present: true, version: parseVersion(err.stderr), ok: true };
+      const parsed = parseVersion(err.stderr);
+      // Only mark as ok if we actually matched a version pattern in stderr
+      if (parsed.matched) {
+        return { name, present: true, version: parsed.version, ok: true };
+      }
     }
     return { name, present: false, version: null, ok: false, note: 'not found on PATH' };
   }
@@ -62,4 +73,4 @@ export async function main(): Promise<void> {
   if (results.some((r) => !r.ok)) process.exitCode = 1;
 }
 
-if (import.meta.url === `file://${encodeURI(process.argv[1])}`) void main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void main();
