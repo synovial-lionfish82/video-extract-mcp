@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+*.log
+/scratch/
+/output/
+models/
+*.wav
+*.mp4
+*.mkv
+*.webm
+frames/
