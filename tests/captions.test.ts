@@ -16,11 +16,29 @@ describe('parseVtt', () => {
     expect(s).toHaveLength(2);
     expect(s[0]).toEqual({ start: 1, end: 4.2, text: 'Hello there' });
   });
-  it('strips inline cue tags', () => {
-    expect(parseVtt(VTT)[1]!.text).toBe('Second line');
+  it('strips inline cue tags and verifies second cue timing', () => {
+    const s = parseVtt(VTT);
+    expect(s[1]!.text).toBe('Second line');
+    expect(s[1]).toEqual({ start: 4.5, end: 6, text: 'Second line' });
   });
   it('ignores malformed cues rather than throwing', () => {
     expect(parseVtt('WEBVTT\n\ngarbage\n')).toEqual([]);
+  });
+  it('recovers from malformed blocks between valid cues', () => {
+    const vttMixed = `WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+First valid cue
+
+garbage line without timestamp
+
+00:00:03.000 --> 00:00:04.000
+Second valid cue
+`;
+    const s = parseVtt(vttMixed);
+    expect(s).toHaveLength(2);
+    expect(s[0]).toEqual({ start: 1, end: 2, text: 'First valid cue' });
+    expect(s[1]).toEqual({ start: 3, end: 4, text: 'Second valid cue' });
   });
   it('correctly converts timestamps with hours', () => {
     const vttWithHours = `WEBVTT
@@ -40,6 +58,7 @@ describe('chooseCaptionTier', () => {
   it('always prefers manual captions', () => {
     expect(chooseCaptionTier({ manual: 'a.vtt', auto: 'b.vtt' }, 'accurate')).toBe('manual');
     expect(chooseCaptionTier({ manual: 'a.vtt', auto: null }, 'fast')).toBe('manual');
+    expect(chooseCaptionTier({ manual: 'a.vtt', auto: 'b.vtt' }, 'fast')).toBe('manual');
   });
   it('uses auto captions only in fast mode', () => {
     expect(chooseCaptionTier({ manual: null, auto: 'b.vtt' }, 'fast')).toBe('auto');
