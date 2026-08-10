@@ -41,10 +41,8 @@ export async function checkBinary(
       err.stderr.length > 0
     ) {
       const parsed = parseVersion(err.stderr);
-      // Only mark as ok if we actually matched a version pattern in stderr
-      if (parsed.matched) {
-        return { name, present: true, version: parsed.version, ok: true };
-      }
+      // Binary was found and ran (produced stderr), but mark ok only if version pattern matched
+      return { name, present: true, version: parsed.version, ok: parsed.matched, note: parsed.matched ? undefined : 'found but broken or incompatible' };
     }
     return { name, present: false, version: null, ok: false, note: 'not found on PATH' };
   }

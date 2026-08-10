@@ -18,8 +18,11 @@ describe('preflight', () => {
     expect(s.ok).toBe(true);
   });
   it('rejects a binary that exits with non-version stderr', async () => {
-    // Test with 'false' which exits non-zero with no output
-    const s = await checkBinary('false');
-    expect(s.ok).toBe(false);
+    // cat on nonexistent file produces stderr ("No such file or directory") and exits 1.
+    // This exercises the stderr branch without a version pattern, testing that 'ok' depends
+    // on matched version, not just presence of stderr.
+    const s = await checkBinary('cat', '/nonexistent-file-xyz');
+    expect(s.present).toBe(true); // Binary was found and ran
+    expect(s.ok).toBe(false); // But exited with non-version stderr, so not ok
   });
 });
