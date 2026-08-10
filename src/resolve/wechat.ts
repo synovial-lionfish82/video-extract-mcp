@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { join } from 'node:path';
@@ -33,9 +34,18 @@ export type WeChatState = 'ready' | 'auth_required' | 'auth_expired' | 'unsuppor
 
 const WECHAT_HOST = /(^|\.)(weixin\.qq\.com|channels\.weixin\.qq\.com)$/i;
 
+// C0 control characters (includes \r \n \0) plus DEL: all invalid in an HTTP header value.
+// A cookie containing one of these (e.g. an embedded newline from a corrupted copy-paste) must
+// never reach fetch(): Node's header validation throws a TypeError whose .message embeds the
+// raw value verbatim (see callApi's catch for the second, independent layer of defence).
+const INVALID_HEADER_VALUE_RE = /[\x00-\x08\x0A-\x1F\x7F]/;
+
 export function getCredential(): string | null {
   // Injected only; never hardcoded, never logged (spec §7.2).
-  return process.env.NORMA_WECHAT_COOKIE?.trim() || null;
+  const raw = process.env.NORMA_WECHAT_COOKIE?.trim();
+  if (!raw) return null;
+  if (INVALID_HEADER_VALUE_RE.test(raw)) return null; // corrupted credential; treat as absent
+  return raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +129,19 @@ async function callApi(url: string, cookie: string, body?: unknown): Promise<Api
     try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON body; treat as no data */ }
     return { ok: true, httpStatus: res.status, json };
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    // Defense in depth (independent of getCredential()'s own validation): Node's fetch throws a
+    // TypeError both for a generic network failure ("fetch failed", safe -- confirmed by local
+    // reproduction) AND for a header-construction/validation failure, where the message embeds
+    // the OFFENDING HEADER VALUE VERBATIM (confirmed locally: `Headers.append: "<cookie>..." is
+    // an invalid header value.`). Node does not distinguish the two cases by error type, so any
+    // TypeError here is treated as potentially unsafe and never forwarded. Non-TypeError errors
+    // (abort/timeout DOMExceptions, other network errors) are safe to forward -- confirmed by
+    // local reproduction to never embed request data -- and forwarding them keeps real
+    // diagnostics (e.g. "The operation was aborted due to timeout") available to the caller.
+    const message = e instanceof TypeError
+      ? 'network or request error contacting WeChat resolver'
+      : (e as Error).message;
+    return { ok: false, error: message };
   }
 }
 
@@ -162,7 +184,7 @@ export function classifyBusinessError(json: unknown, httpStatus: number): Busine
   return null;
 }
 
-function businessFailure(cls: BusinessClass): ResolveFailure | null {
+export function businessFailure(cls: BusinessClass): ResolveFailure | null {
   if (cls === 'auth') {
     return {
       status: 'auth_expired', resolvedBy: 'wechat',
@@ -342,6 +364,7 @@ export class WeChatHeadlessResolver implements VideoResolver {
         rangeApplied: false,
       };
     } catch (e) {
+      await unlink(out).catch(() => {}); // best-effort: never leave a partial download behind
       return { status: 'extractor_failed', resolvedBy: 'wechat', message: `Failed to download media: ${(e as Error).message}` };
     }
   }

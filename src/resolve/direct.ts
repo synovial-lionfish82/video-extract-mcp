@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { join } from 'node:path';
@@ -40,6 +41,7 @@ export class DirectMediaResolver implements VideoResolver {
         languageHint: null, rangeApplied: false,
       };
     } catch (e) {
+      await unlink(out).catch(() => {}); // best-effort: never leave a partial download behind
       return { status: 'extractor_failed', message: (e as Error).message };
     }
   }
