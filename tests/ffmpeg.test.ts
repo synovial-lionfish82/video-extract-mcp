@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, statSync, mkdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probe, normalize, trim, extractFrame, makeTestVideo } from '../src/media/ffmpeg.js';
+import { run } from '../src/util/run.js';
 
 let dir: string, sample: string;
 beforeAll(async () => {
@@ -15,14 +16,28 @@ describe('ffmpeg layer', () => {
   it('probes duration and dimensions', async () => {
     const p = await probe(sample);
     expect(p.duration).toBeGreaterThan(5);
-    expect(p.width).toBe(640);
+    expect(p.width).toBe(1280);
     expect(p.fps).toBeGreaterThan(0);
   });
   it('normalizes to a 720p-capped video plus 16kHz mono wav', async () => {
     const { video, audio } = await normalize(sample, dir);
     expect(existsSync(video)).toBe(true);
+    expect(statSync(video).size).toBeGreaterThan(0);
     expect(existsSync(audio)).toBe(true);
-    expect((await probe(video)).height).toBeLessThanOrEqual(720);
+    expect(statSync(audio).size).toBeGreaterThan(0);
+    // Verify audio is actually 16kHz mono via ffprobe
+    const { stdout } = await run('ffprobe', [
+      '-v', 'error', '-select_streams', 'a:0',
+      '-show_entries', 'stream=sample_rate,channels',
+      '-of', 'json', audio,
+    ]);
+    const audioInfo = JSON.parse(stdout) as { streams?: Array<{ sample_rate?: string; channels?: number }> };
+    const audioStream = audioInfo.streams?.[0];
+    expect(Number(audioStream?.sample_rate ?? 0)).toBe(16000);
+    expect(audioStream?.channels).toBe(1);
+    // Verify video height is capped at 720
+    const vp = await probe(video);
+    expect(vp.height).toBe(720);
   });
   it('trims to the requested range', async () => {
     const out = await trim(sample, 1, 3, join(dir, 'clip.mp4'));
@@ -33,5 +48,22 @@ describe('ffmpeg layer', () => {
   it('extracts a single frame at a timestamp', async () => {
     const out = await extractFrame(sample, 2.5, join(dir, 'f.jpg'));
     expect(existsSync(out)).toBe(true);
+    expect(statSync(out).size).toBeGreaterThan(0);
+  });
+  it('handles audio absence: silent video produces no audio file', async () => {
+    // Create a fixture with no audio stream (colour source only, no anullsrc)
+    const noAudioFixture = join(dir, 'silent.mp4');
+    const r = await run('ffmpeg', [
+      '-y', '-f', 'lavfi', '-i', 'color=c=gray:s=640x480:d=2',
+      '-r', '25', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', noAudioFixture,
+    ]);
+    expect(r.code).toBe(0);
+    // Normalize should succeed for video but audio file should not exist
+    const workDir = join(dir, 'silent-work');
+    mkdirSync(workDir, { recursive: true });
+    const { video, audio } = await normalize(noAudioFixture, workDir);
+    expect(existsSync(video)).toBe(true);
+    expect(statSync(video).size).toBeGreaterThan(0);
+    expect(existsSync(audio)).toBe(false);
   });
 });

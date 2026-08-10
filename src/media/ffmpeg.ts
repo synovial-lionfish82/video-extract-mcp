@@ -32,16 +32,9 @@ export async function normalize(input: string, workDir: string) {
     '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', video,
   ]);
   if (v.code !== 0) throw new Error(`normalize(video) failed: ${v.stderr.slice(-400)}`);
-  // Try to extract audio from input. If it fails (no audio track), generate silence.
-  const a = await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio]);
-  if (a.code !== 0) {
-    // Generate silent audio matching video duration
-    const p = await probe(video);
-    await run('ffmpeg', [
-      '-y', '-f', 'lavfi', '-i', `anullsrc=r=16000:cl=mono:d=${p.duration}`,
-      '-c:a', 'pcm_s16le', audio,
-    ]);
-  }
+  // Attempt to extract audio. If input has no audio stream, the audio file will not be created.
+  // Downstream treats file absence as "no audio" and decides whether to transcribe accordingly.
+  await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio]);
   return { video, audio };
 }
 
@@ -60,16 +53,17 @@ export async function extractFrame(video: string, timestamp: number, out: string
   return out;
 }
 
-/** Synthetic fixture: shot changes at 2s and 4s so scene detection has real boundaries. */
+/** Synthetic fixture: 1280x800 video with three 2s colour segments (red→blue→green) at hard cuts + silent audio track. */
 export async function makeTestVideo(out: string, seconds = 6) {
   const per = Math.max(1, Math.floor(seconds / 3));
   const r = await run('ffmpeg', [
     '-y',
-    '-f', 'lavfi', '-i', `color=c=red:s=640x360:d=${per}`,
-    '-f', 'lavfi', '-i', `color=c=blue:s=640x360:d=${per}`,
-    '-f', 'lavfi', '-i', `color=c=green:s=640x360:d=${per}`,
+    '-f', 'lavfi', '-i', `color=c=red:s=1280x800:d=${per}`,
+    '-f', 'lavfi', '-i', `color=c=blue:s=1280x800:d=${per}`,
+    '-f', 'lavfi', '-i', `color=c=green:s=1280x800:d=${per}`,
+    '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${per * 3}`,
     '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]',
-    '-map', '[v]', '-r', '25', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', out,
+    '-map', '[v]', '-map', '3:a', '-r', '25', '-c:v', 'libx264', '-c:a', 'aac', '-pix_fmt', 'yuv420p', out,
   ]);
   if (r.code !== 0) throw new Error(`makeTestVideo failed: ${r.stderr.slice(-400)}`);
   return out;
