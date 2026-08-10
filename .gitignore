@@ -10,3 +10,5 @@ models/
 *.mkv
 *.webm
 frames/
+.superpowers/
+experiments/
