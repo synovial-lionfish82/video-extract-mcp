@@ -38,11 +38,15 @@ async function main(): Promise<void> {
   console.log(json);
 }
 
-// A plain `file://${process.argv[1]}` comparison breaks under TypeScript
-// strict mode with noUncheckedIndexedAccess (process.argv[1] is
-// `string | undefined`) and mishandles paths containing special characters.
-// pathToFileURL with an explicit undefined guard is the correct precedent
-// already established by scripts/preflight.ts -- followed verbatim here so
-// this entry guard doesn't fire (and doesn't call analyzeVideo against a
-// live URL) while the test suite merely imports parseArgs.
+// A plain `file://${process.argv[1]}` comparison is wrong at runtime, not
+// at compile time: import.meta.url is always percent-encoded, while naive
+// template-literal concatenation of process.argv[1] is not, so the two
+// never compare equal in a checkout path containing a space or other
+// special character -- including this repository's own. pathToFileURL is
+// the fix, and it needs the `?? ''` fallback because (unlike a template
+// literal) its own signature requires a `string`, not `string | undefined`.
+// This is the correct precedent already established by scripts/preflight.ts
+// -- followed verbatim here so this entry guard doesn't fire (and doesn't
+// call analyzeVideo against a live URL) while the test suite merely
+// imports parseArgs.
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void main();
