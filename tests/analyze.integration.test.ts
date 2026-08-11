@@ -1,0 +1,248 @@
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { makeTestVideo } from '../src/media/ffmpeg.js';
+import { SELECTOR_VERSION } from '../src/vision/select.js';
+
+// analyzeVideo (and its whole transitive import graph) is loaded from the
+// COMPILED dist/ output, NOT the TS source -- requires `npm run build` first
+// (see package.json's test script / this task's Step 5). This is not a style
+// preference: src/transcript/asr.ts and src/vision/embed.ts locate their
+// worker scripts via `dirname(fileURLToPath(import.meta.url)) + 'asrWorker.js'
+// / 'embedWorker.js'` -- a relative path that only resolves once compiled
+// (asrWorker.js/embedWorker.js exist as siblings only in dist/, never in
+// src/, which has just the .ts originals). vitest's convenience .js->.ts
+// resolution means `import('../src/analyze.js')` would silently load the
+// SOURCE instead, and both workers would then fail to spawn
+// (MODULE_NOT_FOUND) -- caught and swallowed by analyze.ts's own
+// `.catch(() => null / [])` fallbacks, so a test asserting only "frames.length
+// > 0" would PASS while never having run a real model. Verified directly
+// against this exact test file before this fix: 'produces a manifest with
+// frames...' passed while the embed worker threw
+// `embed worker failed: ... MODULE_NOT_FOUND` on every call, and the
+// transcript-asserting test caught the identical failure on the ASR worker
+// (see task-14-report.md for both literal traces). This matches the
+// established pattern already used by tests/asr.integration.test.ts and
+// tests/embed.integration.test.ts, which both import their subject from
+// dist/ for exactly this reason.
+vi.mock('../dist/vision/embed.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../dist/vision/embed.js')>();
+  return { ...real, embedImages: vi.fn(real.embedImages) };
+});
+vi.mock('../dist/vision/quality.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../dist/vision/quality.js')>();
+  return { ...real, filterCandidates: vi.fn(real.filterCandidates) };
+});
+
+// Imported AFTER the vi.mock calls above (textually and, more importantly,
+// semantically -- vitest hoists vi.mock factories ahead of all imports in
+// this module regardless of position), so these bindings are the mocked
+// wrappers: vi.fn()-wrapped but calling straight through to the real
+// implementation until a test overrides them with .mockImplementationOnce().
+const { analyzeVideo } = await import('../dist/analyze.js');
+const { buildManifest } = await import('../dist/manifest.js');
+const { embedImages } = await import('../dist/vision/embed.js');
+const { filterCandidates } = await import('../dist/vision/quality.js');
+
+/** A deterministic, distinct, already-unit-norm 768-dim vector per index. */
+function unitVec(i: number): number[] {
+  const v = new Array(768).fill(0) as number[];
+  v[i % 768] = 1;
+  return v;
+}
+
+// Guards the one test that requires the real ASR models on disk (mirrors
+// tests/asr.integration.test.ts's own guard) so this suite degrades
+// gracefully -- skips cleanly, does not fail -- on a machine that has the
+// project built but hasn't fetched the ~1.5GB of ASR models.
+const ASR_MODELS_READY = existsSync('models/silero_vad.onnx') && existsSync('models/sherpa-onnx-whisper-small');
+
+describe('analyzeVideo (local file, end to end)', () => {
+  it('produces a manifest with frames from a local synthetic video', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const m = await analyzeVideo(`file://${v}`.replace('file://', ''), {
+      maxFrames: 4, transcript: false, outDir: join(dir, 'out'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames.length).toBeGreaterThan(0);
+    expect(m.frames.length).toBeLessThanOrEqual(4);
+    expect(m.processing.peakRssMb).toBeGreaterThan(0);
+    expect(m.processing.selectorVersion).toBe(SELECTOR_VERSION);
+    expect(m.processing.candidateFrames).toBeGreaterThan(0);
+    expect(existsSync(m.frames[0]!.image)).toBe(true);
+    // Every selected frame's image must be a real file, not just the first.
+    for (const f of m.frames) expect(existsSync(f.image)).toBe(true);
+    // Printed, not just asserted on: the brief asks to "inspect the printed
+    // peakRssMb", and a report claiming embeddings ran needs more than
+    // "frames exist" -- two grid-textured frames sampled seconds apart
+    // inside the SAME static colour segment (e.g. the two blue-segment
+    // candidates at ~3.35s/5s) are near pixel-identical, so a genuine SigLIP
+    // embedding run must produce a real nonzero cosine similarity for at
+    // least one selected frame against another; if the embed worker silently
+    // failed (as it did before this suite was fixed to import from dist/ --
+    // see the note at the top of this file), EVERY nearestSelectedSimilarity
+    // would read exactly 0, with no exceptions.
+    const maxSim = Math.max(...m.frames.map((f) => f.nearestSelectedSimilarity));
+    console.log('[test1] processing:', JSON.stringify(m.processing), 'maxNearestSelectedSimilarity:', maxSim);
+    expect(maxSim).toBeGreaterThan(0);
+  }, 900_000);
+
+  it('returns a clean failure manifest for an unresolvable URL', async () => {
+    const m = await analyzeVideo('https://example.invalid/nope', { transcript: false });
+    expect(m.source.status).not.toBe('ok');
+    expect(m.frames).toEqual([]);
+    expect(m.transcript).toBeNull();
+    expect(m.processing.peakRssMb).toBeGreaterThan(0);
+  }, 300_000);
+
+  it('respects the maxFrames budget when more candidates survive than the budget allows', async () => {
+    // Mocked embed (fast, deterministic) -- this test is about the budget
+    // wiring, not embedding correctness, so it doesn't need the real worker.
+    vi.mocked(embedImages).mockImplementationOnce(async (paths: string[]) => paths.map((_, i) => unitVec(i)));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-budget-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const m = await analyzeVideo(v, { maxFrames: 2, transcript: false, outDir: join(dir, 'out') });
+    expect(m.source.status).toBe('ok');
+    // The 9s grid fixture yields more raw candidates than the budget -- this
+    // is what makes the assertion below a genuine constraint, not a number
+    // that happens to already fit.
+    expect(m.processing.candidateFrames).toBeGreaterThan(2);
+    expect(m.frames.length).toBe(2);
+  }, 120_000);
+
+  it.skipIf(!ASR_MODELS_READY)(
+    'runs ASR to completion before the vision worker starts, in one real call (spec §4/§19 staged memory)',
+    async () => {
+      // The one test in this file that exercises BOTH real staged workers in
+      // a single analyzeVideo() call -- proving the sequencing claim this
+      // whole task exists to implement, not just that each worker
+      // independently works (that was already proven in Tasks 11/12). The
+      // fixture's audio track is silent (anullsrc), so VAD legitimately
+      // finds no speech and Whisper returns zero segments -- that is still a
+      // real ASR run (model loaded, VAD executed, worker exited), just an
+      // honest empty transcript, not a fabricated one. Guarded by
+      // ASR_MODELS_READY (skips, does not fail, when models aren't fetched)
+      // -- everything else in this suite needs no ASR model at all.
+      const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-staged-'));
+      const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+      const m = await analyzeVideo(v, { maxFrames: 4, outDir: join(dir, 'out') });
+      expect(m.source.status).toBe('ok');
+      expect(m.transcript).not.toBeNull();
+      expect(m.transcript!.source).toBe('asr');
+      expect(Array.isArray(m.transcript!.segments)).toBe(true);
+      expect(m.frames.length).toBeGreaterThan(0);
+      console.log('[staged] processing:', JSON.stringify(m.processing), 'transcript:', JSON.stringify(m.transcript));
+      expect(m.processing.peakRssMb).toBeGreaterThan(0);
+    },
+    900_000,
+  );
+});
+
+describe('analyzeVideo -- issue 1: a failed embedding must not be preferentially selected', () => {
+  it('drops a candidate whose embedding failed once another candidate embedded successfully (constructed directly via vi.mock)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-embedfail-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+
+    let capturedPaths: string[] = [];
+    vi.mocked(embedImages).mockImplementationOnce(async (paths: string[]) => {
+      capturedPaths = paths;
+      // Slot 0 fails (embedImages' real contract for a failed image: `[]`,
+      // not a dropped entry -- see src/vision/embedWorker.ts). Every other
+      // slot gets a real, distinct, orthogonal unit vector.
+      return paths.map((_, i) => (i === 0 ? [] : unitVec(i)));
+    });
+
+    const m = await analyzeVideo(v, { maxFrames: 10, transcript: false, outDir: join(dir, 'out') });
+
+    // The mock must actually have been exercised with more than one
+    // candidate, or this test cannot discriminate anything.
+    expect(embedImages).toHaveBeenCalled();
+    expect(capturedPaths.length).toBeGreaterThanOrEqual(2);
+
+    expect(m.source.status).toBe('ok');
+    const failedPath = capturedPaths[0]!;
+    // The old bug: an empty-embedding candidate reads as maximally novel
+    // (cosine([], x) === 0, same as maxSim's own default) and gets
+    // PREFERENTIALLY selected. Under the fix it must never appear at all
+    // once a real alternative exists.
+    expect(m.frames.some((f) => f.image === failedPath)).toBe(false);
+    // And it must not have just been silently swallowed along with
+    // everything else -- the other, embeddable candidates ARE selected.
+    expect(m.frames.length).toBe(capturedPaths.length - 1);
+  }, 120_000);
+
+  it('still selects frames when EVERY embedding fails (no mass-drop when there is nothing to compare against)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-embedallfail-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+
+    vi.mocked(embedImages).mockImplementationOnce(async (paths: string[]) => paths.map(() => []));
+
+    const m = await analyzeVideo(v, { maxFrames: 10, transcript: false, outDir: join(dir, 'out') });
+    expect(embedImages).toHaveBeenCalled();
+    expect(m.source.status).toBe('ok');
+    // If the fix dropped candidates whenever an embedding is missing (rather
+    // than only when SOME other candidate embedded successfully), this would
+    // be 0 -- a healthy video with a merely-unavailable embedding stage would
+    // silently produce no frames at all.
+    expect(m.frames.length).toBeGreaterThan(0);
+  }, 120_000);
+});
+
+describe('analyzeVideo -- issue 2: filterCandidates throwing on total batch failure', () => {
+  it('surfaces a systemic candidate-pipeline failure as a clean, honest failure manifest -- not a throw, not silent empty-but-ok frames', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-qfail-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+
+    vi.mocked(filterCandidates).mockImplementationOnce(async () => {
+      throw new Error('SIMULATED: all 4 candidate(s) failed to score (first error: boom)');
+    });
+
+    // No try/catch here on purpose: if analyzeVideo let the throw escape as
+    // a promise rejection instead of catching it, this `await` would make
+    // the whole test fail/error out -- that IS the "does not throw" proof.
+    const m = await analyzeVideo(v, { maxFrames: 4, transcript: false, outDir: join(dir, 'out') });
+
+    expect(filterCandidates).toHaveBeenCalled();
+    expect(m.source.status).not.toBe('ok');
+    expect(m.frames).toEqual([]);
+    expect(m.source.reason).toBeDefined();
+    expect(m.source.reason).toContain('SIMULATED');
+    // rss.stop() must still run on this path.
+    expect(m.processing.peakRssMb).toBeGreaterThan(0);
+  }, 120_000);
+});
+
+describe('buildManifest', () => {
+  it('maps every field into the manifest shape, including the live selector version', () => {
+    const m = buildManifest({
+      url: 'https://x.com/v', platform: 'youtube', title: 'T', duration: 12.5,
+      resolvedBy: 'ytdlp', status: 'ok',
+      transcript: null, frames: [], candidateCount: 7, peakRssMb: 123, mode: 'accurate',
+    });
+    expect(m.source).toEqual({
+      url: 'https://x.com/v', platform: 'youtube', title: 'T', duration: 12.5,
+      resolvedBy: 'ytdlp', status: 'ok',
+    });
+    expect(m.processing).toEqual({
+      selectedFrames: 0, candidateFrames: 7, peakRssMb: 123, selectorVersion: SELECTOR_VERSION, mode: 'accurate',
+    });
+  });
+
+  it('omits `reason` entirely (not just undefined) when none is given', () => {
+    const m = buildManifest({
+      url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok',
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast',
+    });
+    expect('reason' in m.source).toBe(false);
+  });
+
+  it('includes `reason` when one is given', () => {
+    const m = buildManifest({
+      url: 'u', platform: 'unknown', title: '', duration: 0, resolvedBy: 'none', status: 'not_found',
+      reason: 'nope', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'accurate',
+    });
+    expect(m.source.reason).toBe('nope');
+  });
+});

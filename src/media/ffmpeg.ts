@@ -53,7 +53,27 @@ export async function extractFrame(video: string, timestamp: number, out: string
   return out;
 }
 
-/** Synthetic fixture: 1280x800 video with three 2s colour segments (red→blue→green) at hard cuts + silent audio track. */
+/**
+ * Synthetic fixture: 1280x800 video with three colour segments (red->blue->green)
+ * at hard cuts + silent audio track. Segment length defaults to 1/3 of `seconds`.
+ *
+ * Each segment carries a thin drawgrid overlay on top of its flat colour --
+ * NOT decorative. A perfectly flat colour frame has zero-everywhere Laplacian
+ * response (no edges anywhere), so src/vision/quality.ts's blur gate
+ * (variance below BLUR_FLOOR=8 reads as blur/fade/dissolve) rejects every
+ * single frame extracted from a flat-colour video, all the way down to 0
+ * survivors -- verified directly: extractCandidates+filterCandidates on the
+ * original flat-colour fixture returned 0/4 candidates for a 9s video, which
+ * makes "a successful run produces a manifest with frames" (Task 14)
+ * unsatisfiable no matter what the orchestrator does downstream. The grid
+ * lines give every frame genuine edge content (confirmed: 4/4 candidates
+ * survive with real quality scores) while staying cheap to encode (a
+ * repeating line pattern is still highly compressible, ~100KB for 9s,
+ * vs. tens of MB for full random noise) and leaving scene-cut timing/scoring
+ * intact (boundaries still land within ~0.35s of each hard cut; verified
+ * scdet scores ~0.197 at 9s and 6s, both comfortably clear of the detection
+ * threshold and comfortably under the "suppress at threshold=50" test).
+ */
 export async function makeTestVideo(out: string, seconds = 6) {
   const per = Math.max(1, Math.floor(seconds / 3));
   const r = await run('ffmpeg', [
@@ -62,7 +82,11 @@ export async function makeTestVideo(out: string, seconds = 6) {
     '-f', 'lavfi', '-i', `color=c=blue:s=1280x800:d=${per}`,
     '-f', 'lavfi', '-i', `color=c=green:s=1280x800:d=${per}`,
     '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${per * 3}`,
-    '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]',
+    '-filter_complex',
+    '[0:v]drawgrid=w=40:h=40:t=3:c=black@0.6[v0];' +
+    '[1:v]drawgrid=w=40:h=40:t=3:c=white@0.6[v1];' +
+    '[2:v]drawgrid=w=40:h=40:t=3:c=black@0.6[v2];' +
+    '[v0][v1][v2]concat=n=3:v=1:a=0[v]',
     '-map', '[v]', '-map', '3:a', '-r', '25', '-c:v', 'libx264', '-c:a', 'aac', '-pix_fmt', 'yuv420p', out,
   ]);
   if (r.code !== 0) throw new Error(`makeTestVideo failed: ${r.stderr.slice(-400)}`);
