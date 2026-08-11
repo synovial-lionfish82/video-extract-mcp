@@ -1,0 +1,334 @@
+import { writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import type { AnalyzeOptions, Manifest, ResolveStatus } from '../src/types.js';
+
+// Implements spec §20 -- this IS the acceptance test for network-touching
+// behaviour. Sixteen earlier tasks proved the pipeline against a synthetic
+// local fixture; this script is the only thing that can prove any claim
+// about real platforms (YouTube captions/ASR routing, TikTok's burned-in
+// subtitles not flooding the frame budget, a DRM page failing cleanly,
+// etc). Its honesty is the whole point: a row that never ran must be
+// impossible to mistake for a row that passed.
+
+export interface MatrixCase {
+  name: string;
+  url: string;
+  opts?: AnalyzeOptions;
+  expectStatus: ResolveStatus;
+  proves: string;
+  /** Extra env vars (beyond `url`) that must be non-blank for this case to run. */
+  requiresEnv?: string[];
+}
+
+// Fill in concrete URLs before the first real run; one case per spec §20 row.
+// The WeChat row additionally requires NORMA_WECHAT_COOKIE -- deliberately
+// left unset until the clean-room resolver (experiments/wechat-clean-room/)
+// is validated, so that row stays an honest SKIP rather than a false FAIL
+// against a resolver everyone already knows isn't ready.
+export const CASES: MatrixCase[] = [
+  { name: 'youtube-manual-captions', url: process.env.M_YT_MANUAL ?? '', expectStatus: 'ok', proves: 'caption tier 1 + alignment' },
+  { name: 'youtube-no-captions', url: process.env.M_YT_NOCAP ?? '', expectStatus: 'ok', proves: 'VAD -> Whisper ASR' },
+  { name: 'tiktok-burned-in-subs', url: process.env.M_TIKTOK ?? '', expectStatus: 'ok', proves: 'subtitle-aware OCR does not over-select' },
+  { name: 'facebook-reel', url: process.env.M_FACEBOOK ?? '', expectStatus: 'ok', proves: 'Facebook extraction' },
+  { name: 'login-walled', url: process.env.M_AUTH ?? '', expectStatus: 'auth_required', proves: 'clean auth_required' },
+  { name: 'direct-mp4', url: process.env.M_MP4 ?? '', expectStatus: 'ok', proves: 'DirectMediaResolver' },
+  { name: 'generic-embed', url: process.env.M_EMBED ?? '', expectStatus: 'ok', proves: 'yt-dlp generic extraction' },
+  { name: 'wechat-share', url: process.env.M_WECHAT ?? '', expectStatus: 'ok', proves: 'headless WeChat + SenseVoice', requiresEnv: ['NORMA_WECHAT_COOKIE'] },
+  { name: 'chinese-video', url: process.env.M_ZH ?? '', opts: { preferredLanguage: 'zh' }, expectStatus: 'ok', proves: 'SenseVoice routing' },
+  { name: 'drm-page', url: process.env.M_DRM ?? '', expectStatus: 'unsupported', proves: 'clean unsupported/drm_protected' },
+  { name: 'range-23-60', url: process.env.M_YT_MANUAL ?? '', opts: { start: 23, end: 60 }, expectStatus: 'ok', proves: 'range slice + fallback' },
+];
+
+// ---------------------------------------------------------------------------
+// Pure logic: skip detection, outcome classification, row/document rendering.
+// Kept free of I/O and of analyzeVideo itself so all of it is unit-testable
+// without a network connection (tests/matrix.test.ts).
+// ---------------------------------------------------------------------------
+
+/** Null when the case is runnable; otherwise the human-readable reason it is not. */
+export function skipReason(c: MatrixCase): string | null {
+  if (!c.url.trim()) return 'no URL configured';
+  const missing = (c.requiresEnv ?? []).filter((k) => !(process.env[k] ?? '').trim());
+  if (missing.length > 0) return `missing required env: ${missing.join(', ')}`;
+  return null;
+}
+
+export type RowOutcome = 'PASS' | 'FAIL' | 'SKIP' | 'TIMEOUT';
+
+export type CaseExecution =
+  | { kind: 'skipped'; reason: string }
+  | { kind: 'timeout'; ms: number }
+  | { kind: 'threw'; message: string }
+  | { kind: 'ran'; status: string; frames: number; candidates: number; transcriptSource: string | null; peakRssMb: number };
+
+/**
+ * The one comparison the whole matrix hinges on. Deliberately a bare
+ * equality check against whatever expectStatus says -- NOT an "is it ok"
+ * check -- so rows that expect a failure status (login-walled/auth_required,
+ * drm-page/unsupported) pass by matching that status, exactly like every
+ * other row, instead of needing special-cased logic that's easy to get
+ * backwards (task-17-brief.md's own explicit warning).
+ */
+export function classifyOutcome(expectStatus: ResolveStatus, exec: CaseExecution): RowOutcome {
+  if (exec.kind === 'skipped') return 'SKIP';
+  if (exec.kind === 'timeout') return 'TIMEOUT';
+  if (exec.kind === 'threw') return 'FAIL';
+  return exec.status === expectStatus ? 'PASS' : 'FAIL';
+}
+
+export interface MatrixResult {
+  name: string;
+  proves: string;
+  expectStatus: ResolveStatus;
+  outcome: RowOutcome;
+  status: string;
+  frames: number | null;
+  candidates: number | null;
+  transcriptSource: string | null;
+  peakRssMb: number | null;
+}
+
+/** Redacts the operator's home-directory path and OS username from free text
+ * before it can reach a committed document (thrown-error messages routinely
+ * embed absolute filesystem paths). Never hardcodes the literal username --
+ * it is read from the OS at the time sanitize() runs, so this file itself
+ * never carries anyone's username in its own committed source. */
+export function sanitize(text: string): string {
+  let out = text.replace(/\/Users\/[^\s'"()]+/g, '[REDACTED_PATH]');
+  const user = safeUsername();
+  if (user.length > 0) out = out.split(user).join('[REDACTED_USER]');
+  return out;
+}
+
+function safeUsername(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return '';
+  }
+}
+
+const DETAIL_MAX = 200;
+
+export function toMatrixResult(c: MatrixCase, exec: CaseExecution): MatrixResult {
+  const outcome = classifyOutcome(c.expectStatus, exec);
+  const base = { name: c.name, proves: c.proves, expectStatus: c.expectStatus, outcome };
+  if (exec.kind === 'skipped') {
+    return { ...base, status: `SKIPPED (${sanitize(exec.reason)})`, frames: null, candidates: null, transcriptSource: null, peakRssMb: null };
+  }
+  if (exec.kind === 'timeout') {
+    return { ...base, status: `TIMEOUT (>${exec.ms}ms)`, frames: null, candidates: null, transcriptSource: null, peakRssMb: null };
+  }
+  if (exec.kind === 'threw') {
+    return { ...base, status: `ERROR: ${sanitize(exec.message).slice(0, DETAIL_MAX)}`, frames: null, candidates: null, transcriptSource: null, peakRssMb: null };
+  }
+  return {
+    ...base, status: exec.status, frames: exec.frames, candidates: exec.candidates,
+    transcriptSource: exec.transcriptSource, peakRssMb: exec.peakRssMb,
+  };
+}
+
+// Deliberately four distinct, non-abbreviated tokens (never '-', never blank)
+// so a skipped or timed-out row can never be misread as a pass or an
+// ordinary fail -- the property tests/matrix.test.ts tests most heavily.
+const PASS_TOKEN: Record<RowOutcome, string> = { PASS: 'YES', FAIL: 'NO', SKIP: 'SKIP', TIMEOUT: 'TIMEOUT' };
+
+function cell(v: number | string | null): string {
+  return v === null ? '-' : String(v);
+}
+
+export function formatRow(r: MatrixResult): string {
+  return `| ${r.name} | ${r.proves} | ${r.status} | ${r.expectStatus} | ${cell(r.frames)} | ${cell(r.candidates)} | ${cell(r.transcriptSource)} | ${cell(r.peakRssMb)} | ${PASS_TOKEN[r.outcome]} |`;
+}
+
+export function formatConsoleLine(r: MatrixResult): string {
+  const rss = r.peakRssMb !== null ? ` (peak ${r.peakRssMb} MB)` : '';
+  return `${r.outcome} ${r.name} -> ${r.status}${rss}`;
+}
+
+export interface MatrixSummary {
+  total: number; executed: number; skipped: number; passed: number; failed: number; timedOut: number;
+}
+
+export function summarize(results: MatrixResult[]): MatrixSummary {
+  const skipped = results.filter((r) => r.outcome === 'SKIP').length;
+  const passed = results.filter((r) => r.outcome === 'PASS').length;
+  const failed = results.filter((r) => r.outcome === 'FAIL').length;
+  const timedOut = results.filter((r) => r.outcome === 'TIMEOUT').length;
+  return { total: results.length, executed: results.length - skipped, skipped, passed, failed, timedOut };
+}
+
+export function renderDocument(results: MatrixResult[], opts: { generatedAt?: Date } = {}): string {
+  const s = summarize(results);
+  const generatedAt = (opts.generatedAt ?? new Date()).toISOString();
+
+  const headerLines = [
+    '# Acceptance Matrix',
+    '',
+    `Generated by \`npm run matrix\` at ${generatedAt}. Implements spec §20 (network-facing acceptance test).`,
+    '',
+    `**${s.executed} of ${s.total} rows executed; ${s.skipped} of ${s.total} skipped.**`,
+  ];
+  if (s.executed > 0) {
+    headerLines.push(`**Of the executed rows: ${s.passed} passed, ${s.failed} failed, ${s.timedOut} timed out.**`);
+  }
+  if (s.executed === 0) {
+    headerLines.push(
+      '',
+      '> **UNPROVEN.** Every row below is a SKIP: no row in this matrix has been run',
+      '> against a real URL. This document proves nothing yet about the engine\'s',
+      '> network-facing behaviour -- it only confirms the runner itself completes',
+      '> cleanly with no configuration. Set the `M_*` environment variables (and,',
+      '> for the WeChat row, `NORMA_WECHAT_COOKIE`) and re-run `npm run matrix`.',
+    );
+  }
+
+  const table = [
+    '| Case | Proves | Status | Expected | Frames | Cands | Transcript | Peak RSS (MB) | Pass |',
+    '|---|---|---|---|---:|---:|---|---:|:--:|',
+    ...results.map(formatRow),
+  ];
+
+  const footer = [
+    '',
+    '## Summary',
+    '',
+    `- Rows total: ${s.total}`,
+    `- Executed: ${s.executed}`,
+    `- Skipped: ${s.skipped}`,
+    `- Passed: ${s.passed}`,
+    `- Failed: ${s.failed}`,
+    `- Timed out: ${s.timedOut}`,
+    '',
+    'Memory target: peak RSS should trend below 2048 MB for the complete tool (spec §4).',
+    '',
+  ];
+
+  return [...headerLines, '', ...table, ...footer].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Impure: running a case for real, and the top-level driver.
+// ---------------------------------------------------------------------------
+
+export type AnalyzeFn = (url: string, opts?: AnalyzeOptions) => Promise<Manifest>;
+
+const TIMEOUT_SENTINEL: unique symbol = Symbol('matrix-timeout');
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT_SENTINEL> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+    timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+    // If the timeout won the race, `p` is still pending and may reject later
+    // (a wedged child process eventually erroring). An unhandled rejection
+    // crashes the whole process by default -- one hung URL would then take
+    // the entire matrix run down instead of just that row. This does not
+    // cancel the underlying work (Node has no general promise cancellation);
+    // it only defuses a rejection nobody is listening for any more.
+    // Harmless no-op when `p` is the one that already won the race.
+    p.catch(() => {});
+  }
+}
+
+export async function execCase(c: MatrixCase, opts: { timeoutMs: number; analyze: AnalyzeFn }): Promise<CaseExecution> {
+  const reason = skipReason(c);
+  if (reason) return { kind: 'skipped', reason };
+  try {
+    const result = await withTimeout(opts.analyze(c.url, { maxFrames: 20, ...c.opts }), opts.timeoutMs);
+    if (result === TIMEOUT_SENTINEL) return { kind: 'timeout', ms: opts.timeoutMs };
+    return {
+      kind: 'ran',
+      status: result.source.status,
+      frames: result.processing.selectedFrames,
+      candidates: result.processing.candidateFrames,
+      transcriptSource: result.transcript?.source ?? 'none',
+      peakRssMb: result.processing.peakRssMb,
+    };
+  } catch (e) {
+    return { kind: 'threw', message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Real videos over a real network can legitimately take a couple of minutes
+// (resolve + normalize + ASR + embedding, each a subprocess model load) --
+// generous enough not to punish a slow-but-healthy case, short enough that
+// one bad URL cannot stall the whole matrix (task-17-brief.md's own concern).
+const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_OUT_FILE = 'docs/acceptance-matrix.md';
+
+let realAnalyze: AnalyzeFn | null = null;
+
+/**
+ * Lazily loads the REAL analyzeVideo from the COMPILED dist/ output, never
+ * from src/. This is not a style choice: src/transcript/asr.ts and
+ * src/vision/embed.ts locate their worker scripts via
+ * `dirname(fileURLToPath(import.meta.url)) + 'xWorker.js'`, resolved
+ * relative to wherever the importing module physically lives. Loading the
+ * TS source directly (as tsx's own .js -> .ts resolution would do for a
+ * plain '../src/analyze.js' specifier) points that lookup at
+ * src/transcript/ and src/vision/, which hold only .ts originals -- both
+ * workers then fail to spawn (ENOENT/MODULE_NOT_FOUND), and analyze.ts's
+ * own `.catch(() => null / [])` swallows that, silently downgrading every
+ * row to transcript:null + no embeddings while STILL reporting status:'ok'.
+ * That is exactly the false-confidence failure mode this whole task exists
+ * to rule out. Verified for the identical trap in
+ * tests/analyze.integration.test.ts (see task-14-report.md); requires
+ * `npm run build` before `npm run matrix` (see the npm script and the brief).
+ *
+ * Deferred (not a top-level import) so unit tests that inject their own
+ * `analyze` never need dist/ to exist at all.
+ */
+async function getRealAnalyze(): Promise<AnalyzeFn> {
+  if (!realAnalyze) {
+    // dist/ has no .d.ts (tsconfig sets no "declaration" option), so this
+    // specifier is untypeable on its own; the cast recovers real types from
+    // the structurally-identical TS source, which IS covered by tsconfig's
+    // `include` and so fully type-checked by `npm run build`.
+    // @ts-expect-error -- dist/analyze.js has no declaration file.
+    const mod = await import('../dist/analyze.js') as typeof import('../src/analyze.js');
+    realAnalyze = mod.analyzeVideo;
+  }
+  return realAnalyze;
+}
+
+export async function runMatrix(
+  cases: MatrixCase[] = CASES,
+  opts: { timeoutMs?: number; outFile?: string; analyze?: AnalyzeFn; now?: () => Date } = {},
+): Promise<MatrixResult[]> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const analyze = opts.analyze ?? (await getRealAnalyze());
+  const outFile = opts.outFile ?? DEFAULT_OUT_FILE;
+
+  const results: MatrixResult[] = [];
+  for (const c of cases) {
+    const exec = await execCase(c, { timeoutMs, analyze });
+    const result = toMatrixResult(c, exec);
+    results.push(result);
+    console.log(formatConsoleLine(result));
+  }
+
+  writeFileSync(outFile, renderDocument(results, { generatedAt: opts.now?.() ?? new Date() }));
+  return results;
+}
+
+// Robust to spaces in the project path (this repo's own directory name
+// contains one): import.meta.url is always percent-encoded, while
+// process.argv[1] never is, so the naive `file://${process.argv[1]}`
+// comparison silently never matches here and this entry guard would never
+// fire -- `npm run matrix` would exit 0 having done nothing at all, with no
+// error and no document written. Verified empirically against this exact
+// checkout before writing this guard. Same fix already applied in
+// src/cli.ts, src/mcp.ts and scripts/preflight.ts; matched here rather than
+// reintroducing the bug those files already fixed once.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  const results = await runMatrix();
+  const s = summarize(results);
+  console.log(`\n${s.executed} of ${s.total} rows executed (${s.skipped} skipped). Of executed: ${s.passed} passed, ${s.failed} failed, ${s.timedOut} timed out.`);
+  if (s.failed > 0 || s.timedOut > 0) process.exitCode = 1;
+}

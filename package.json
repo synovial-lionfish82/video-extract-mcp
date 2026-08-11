@@ -10,7 +10,8 @@
     "test": "vitest run",
     "build": "tsc",
     "preflight": "tsx scripts/preflight.ts",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "matrix": "tsx scripts/matrix.ts"
   },
   "keywords": [],
   "author": "",
