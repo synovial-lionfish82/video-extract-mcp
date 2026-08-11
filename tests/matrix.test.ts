@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { userInfo } from 'node:os';
 import { buildManifest } from '../src/manifest.js';
+// run() (src/util/run.ts) is a plain child_process wrapper with no
+// import.meta.url-relative worker to spawn -- same "safe to pull straight
+// from src/" reasoning as buildManifest above.
+import { run } from '../src/util/run.js';
 import type { Manifest, ResolveStatus, SelectedFrame } from '../src/types.js';
 import {
   CASES,
@@ -354,16 +358,22 @@ describe('execCase', () => {
     expect(sawUnhandled).toBe(false);
   });
 
-  it('never resolves the real analyzeVideo when the case is skipped (Finding 1)', async () => {
-    // Bug this catches: resolving the real analyzeVideo (a dynamic import of
-    // dist/analyze.js) unconditionally before the skip check runs. On a
-    // fresh checkout dist/ does not exist (gitignored, no build hook), so
-    // that ordering threw ERR_MODULE_NOT_FOUND for a case that would have
-    // skipped anyway -- reproduced for real by moving dist/ aside and
-    // running `npx tsx scripts/matrix.ts` with no env vars: it crashed with
-    // exit 1 and wrote no document at all (see task-17-report.md for the
-    // literal capture). resolveAnalyze here stands in for that dynamic
-    // import without touching the real filesystem.
+  it('never touches analyze/resolveAnalyze when the case is skipped (execCase\'s own contract -- does NOT by itself prove the Finding 1 ordering fix)', async () => {
+    // RELABELED after code review correctly identified this as a false
+    // guard: this test's comment previously claimed it caught "resolving
+    // the real analyzeVideo unconditionally before the skip check runs".
+    // It cannot and never could -- empirically confirmed by reconstructing
+    // the TRUE pre-fix execCase (git show 5009fa3:scripts/matrix.ts) and
+    // running this exact assertion against it: it PASSED identically,
+    // because pre-fix execCase already called skipReason() first and
+    // returned before ever touching opts.analyze. The Finding 1 bug never
+    // lived in execCase -- it lived one level up, in runMatrix's pre-loop
+    // resolution (see the true differential test below, in the "real
+    // subprocess" describe block). What this test DOES legitimately pin:
+    // execCase's own skip-before-resolve ordering, a real property worth
+    // protecting against a future regression that reorders execCase's OWN
+    // body, even though it says nothing about where analyze/resolveAnalyze
+    // gets resolved one level up in runMatrix.
     const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
       throw new Error('simulated: dist/analyze.js not found (no build yet)');
     });
@@ -377,6 +387,21 @@ describe('execCase', () => {
     // real analyzeVideo (e.g. `npm run build` was never run) must still
     // produce a row -- not propagate out of execCase uncaught, which would
     // abort the whole matrix run with no document written at all.
+    //
+    // Confirmed genuinely discriminating (unlike the two tests flagged in
+    // code review): reconstructing the TRUE pre-fix execCase and running
+    // this exact test against it FAILS -- but via a different mechanism
+    // than originally described here. Pre-fix execCase's `analyze` was a
+    // REQUIRED parameter with no resolveAnalyze fallback at all; calling it
+    // the way this test does (only resolveAnalyze supplied) left
+    // `opts.analyze` undefined, so `opts.analyze(...)` threw a plain
+    // TypeError ("opts.analyze is not a function") caught by pre-fix's own
+    // catch block -- resolveAnalyze itself was never invoked, so
+    // `toHaveBeenCalledTimes(1)` failed with "0 times". Literal pre-fix
+    // failure: `AssertionError: expected "spy" to be called 1 times, but
+    // got 0 times` (see task-17-report.md). What this test actually proves
+    // post-fix: resolveAnalyze IS consulted when analyze is absent, and a
+    // failure from it becomes an honest FAIL row rather than a crash.
     const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
       throw new Error('simulated: dist/analyze.js not found (no build yet)');
     });
@@ -431,34 +456,99 @@ describe('runMatrix (wiring, no network)', () => {
     // happens to be built already, so this test alone cannot distinguish
     // pre-fix from post-fix code -- both resolve dist/analyze.js
     // successfully here, and pre-fix code merely left that reference
-    // unused once every case turned out to skip. The differential proof
-    // that the *ordering* bug is fixed lives in the resolveAnalyze-based
-    // tests (this describe block and the execCase describe above); this
-    // test pins the literal end-to-end contract as a real, no-mocks smoke
-    // test -- the same shape of call `npm run matrix` itself makes.
+    // unused once every case turned out to skip. The genuinely differential
+    // proof that the *ordering* bug is fixed -- confirmed to fail against
+    // true pre-fix code, not just a reconstruction of it -- lives in the
+    // "real subprocess, isolated copy with no dist/" describe block below,
+    // which reproduces the actual missing-dist/ condition on disk instead
+    // of relying on a mock old code doesn't know how to call. This test
+    // pins the literal end-to-end contract as a real, no-mocks smoke test
+    // -- the same shape of call `npm run matrix` itself makes.
     const blankCases = CASES.map((c) => ({ ...c, url: '' }));
     const results = await runMatrix(blankCases, { outFile, timeoutMs: 1000 });
     expect(results.every((r) => r.outcome === 'SKIP')).toBe(true);
     const written = readFileSync(outFile, 'utf8');
     expect(written).toContain(`0 of ${CASES.length} rows executed`);
   });
+});
 
-  it('never calls resolveAnalyze for any case when every URL is blank, even with no analyze injected (Finding 1, differential)', async () => {
-    // Bug this catches precisely: getRealAnalyze() (a dynamic import of
-    // dist/analyze.js, which does not exist on a fresh checkout -- gitignored,
-    // no build/postinstall hook creates it) being resolved unconditionally
-    // before any per-case skip check runs, crashing the whole process before
-    // writing any document. resolveAnalyze stands in for that dynamic import
-    // without touching the real filesystem, so this discriminates regardless
-    // of whether dist/ happens to exist on the machine running the test.
-    const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
-      throw new Error('simulated: dist/analyze.js not found (no build yet)');
+describe('runMatrix -- real subprocess, isolated copy with no dist/ (Finding 1, genuinely discriminating)', () => {
+  it('exits 0 and writes the honest all-skip document when dist/ genuinely does not exist on disk', async () => {
+    // REPLACES a test (previously here) whose own comment asserted it
+    // "discriminates regardless of whether dist/ happens to exist on the
+    // machine running the test" -- code review disproved that empirically:
+    // reconstructing the TRUE pre-fix runMatrix (git show
+    // 5009fa3:scripts/matrix.ts) and running that exact assertion against it
+    // PASSED identically, because pre-fix runMatrix reads only opts.analyze
+    // (`opts.analyze ?? await getRealAnalyze()`) and has no
+    // opts.resolveAnalyze field at all -- an unrecognized extra property on
+    // a plain object is silently ignored at runtime, so the mock went
+    // uncalled in both versions for the same reason as the disclosed smoke
+    // test above, not because the ordering bug was fixed. A comment
+    // asserting discrimination that does not exist is worse than no
+    // comment, so that test was removed rather than merely relabeled.
+    //
+    // This test instead reproduces the ACTUAL bug end-to-end, the same
+    // technique the code reviewer used to independently verify the fix:
+    // copy the real scripts/matrix.ts into an isolated temp directory that
+    // has neither dist/ nor src/ (matrix.ts's only src/ import is `import
+    // type`, fully erased at transpile time, so it is never touched at
+    // runtime), run it as a real subprocess with no M_*/NORMA_* env vars,
+    // and observe the result. dist/ does not exist there -- genuinely
+    // absent, not simulated -- so getRealAnalyze()'s dynamic import would
+    // fail exactly as on a fresh clone, IF it were ever reached. Runs
+    // against an ISOLATED copy specifically so this cannot race with other
+    // test files that may concurrently import the real project's shared
+    // dist/ during a parallel `npx vitest run`.
+    //
+    // Verified genuinely differential by running this exact reproduction
+    // (manually, then via this test's own logic) against both versions:
+    // pre-fix -> exit 1, `ERR_MODULE_NOT_FOUND`, no document written;
+    // post-fix -> exit 0, honest document written (see task-17-report.md
+    // for both literal captures).
+    const root = mkdtempSync(join(tmpdir(), 'norma-matrix-nodist-'));
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    // tsx/esbuild falls back to CJS output (which rejects this file's
+    // top-level-await entry guard) when it finds no package.json declaring
+    // "type": "module" anywhere above the target file -- unrelated to the
+    // bug under test; this just makes the isolated copy behave like the
+    // real project instead of erroring for a different reason first.
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+    cpSync(join(process.cwd(), 'scripts', 'matrix.ts'), join(root, 'scripts', 'matrix.ts'));
+    // Deliberately: no dist/, no src/ created under `root`.
+
+    const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of Object.keys(cleanEnv)) {
+      if (/^(M_|NORMA_)/.test(k)) delete cleanEnv[k];
+    }
+
+    const tsxBin = join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    // The script argument MUST be relative (matching exactly how `npm run
+    // matrix` itself invokes tsx: `tsx scripts/matrix.ts` from the project
+    // root), not an absolute path built from `root`. Found while building
+    // this test: on macOS, os.tmpdir() resolves under /var/folders, and
+    // /var is itself a symlink to /private/var. Passed an ABSOLUTE script
+    // path, Node leaves process.argv[1] as the literal (pre-symlink) path
+    // while import.meta.url reflects the realpath-resolved location, so
+    // even the "robust" pathToFileURL(process.argv[1]).href entry guard
+    // fails to match -- a second, independent way to make this exact guard
+    // silently never fire, distinct from the space-in-path issue it was
+    // originally written to fix. Passed a RELATIVE path with the matching
+    // `cwd`, both sides resolve through the same realpath and match
+    // correctly (verified directly: see task-17-report.md). This is a
+    // test-harness-only concern -- `npm run matrix` always uses a relative
+    // path from the project root, so production is unaffected -- but it
+    // would have made this specific test silently useless (0 rows, no
+    // crash, indistinguishable from "working") had it gone unnoticed.
+    const result = await run(tsxBin, ['scripts/matrix.ts'], {
+      cwd: root, env: cleanEnv, timeoutMs: 20_000,
     });
-    const blankCases = CASES.map((c) => ({ ...c, url: '' }));
-    const results = await runMatrix(blankCases, { outFile, timeoutMs: 1000, resolveAnalyze });
-    expect(resolveAnalyze).not.toHaveBeenCalled();
-    expect(results.every((r) => r.outcome === 'SKIP')).toBe(true);
-    const written = readFileSync(outFile, 'utf8');
+
+    expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.code).toBe(0);
+
+    const written = readFileSync(join(root, 'docs', 'acceptance-matrix.md'), 'utf8');
     expect(written).toContain(`0 of ${CASES.length} rows executed`);
     expect(written.toUpperCase()).toContain('UNPROVEN');
   });
