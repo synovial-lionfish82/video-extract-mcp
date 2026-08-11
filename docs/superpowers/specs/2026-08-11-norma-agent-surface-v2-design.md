@@ -29,9 +29,13 @@ resolve_video(
   url:             string    // required
   destinationPath: string    // required
   returnVideo:     boolean   // default FALSE
+  start:           number?   // seconds; only meaningful when returnVideo is true
+  end:             number?   // seconds; only meaningful when returnVideo is true
   comments:        boolean   // default false
 )
 ```
+
+**`start`/`end` fetch only a section of the media.** This closes the loop opened by chapters: an agent reads the chapter list from a metadata-only call, sees the demonstration begins at 12:04, and fetches just that section rather than the whole video. The same source-dependent behaviour from §5 applies — genuinely partial for yt-dlp sources, full-download-then-trim for direct URLs and WeChat. Both are ignored when `returnVideo` is false, since there is no media to bound.
 
 **`returnVideo` defaults to false.** The common first call is "tell me about this video" — cheap, fast, and often enough to decide what to do next. Downloading media is the opt-in.
 
@@ -107,6 +111,19 @@ Ranges are an optimization for some sources and a post-filter for others, and th
 - **Direct URLs and WeChat download in full, then trim.** Byte-range fetching is possible for both and is a worthwhile follow-up, but is not implemented.
 
 Either way, **transcription covers only the selected range** — caption segments are clamped and re-based to the clip, and speech recognition runs on the trimmed audio.
+
+### 5.1 Clipped media re-bases timestamps — state this loudly
+
+A file fetched with `resolve_video(..., start: 724, end: 1200)` **starts at zero**. It is a 476-second video, not a two-hour video with a hole in it.
+
+So an agent that then calls `analyze_video` on that local path must use clip-relative times: the moment 30 seconds into the demonstration is `start: 30`, not `start: 754`. Passing original-video timestamps to a clipped file silently yields the wrong section, or an empty result when the number exceeds the clip's length.
+
+This is the same failure class as the absolute-versus-clip-relative caption bug that blocked the v1 build, and it is now reachable through ordinary tool use rather than only internally. Two mitigations, both required:
+
+- `resolve_video`'s result must state plainly, whenever a range was applied, that the saved file begins at zero and that subsequent timestamps are relative to it — including the original offset so the agent can convert if it needs to.
+- The saved metadata must record the applied range (`clipStart`, `clipEnd` against the original), so the relationship survives beyond the call that created it.
+
+The alternative — passing the original URL to `analyze_video` with original timestamps — remains correct and is the simpler path when an agent is unsure.
 
 ## 6. Platform support, stated honestly
 
