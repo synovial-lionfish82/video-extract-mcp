@@ -105,7 +105,9 @@ describe('power primitives', () => {
     expect(err).toBeInstanceOf(Error);
     const msg = (err as Error).message;
     expect(msg).toContain('100000');
-    expect(msg).toContain('9'); // the fixture's probed duration
+    // '9' alone would trivially match a stray digit anywhere in the message;
+    // '(9s)' pins the actual probed duration specifically.
+    expect(msg).toContain('(9s)'); // the fixture's probed duration
   }, 60_000);
 
   it('getClip at fps=1 over a 3s window returns exactly 3 frames, in order', async () => {
