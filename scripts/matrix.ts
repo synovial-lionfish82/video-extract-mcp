@@ -93,11 +93,25 @@ export interface MatrixResult {
  * before it can reach a committed document (thrown-error messages routinely
  * embed absolute filesystem paths). Never hardcodes the literal username --
  * it is read from the OS at the time sanitize() runs, so this file itself
- * never carries anyone's username in its own committed source. */
+ * never carries anyone's username in its own committed source. Also makes
+ * the text safe to interpolate into a markdown table cell: a raw '|' or line
+ * break in a thrown-error message (ffmpeg/yt-dlp stderr routinely contains
+ * both) corrupts the row's column count once rendered -- a GFM renderer
+ * either truncates a row with more pipe-delimited cells than the header,
+ * silently dropping the true trailing Pass token off the end, or splits the
+ * row across two source lines at the newline, losing the Pass cell from the
+ * table entirely. That is the exact ambiguous-cell failure the
+ * YES/NO/SKIP/TIMEOUT redesign exists to rule out, reintroduced through a
+ * different door -- found in code review, reproduced with
+ * `usage: tool --a=1|--b=2 failed | exit 1\nsecond line | more pipes |||`
+ * against the pre-fix code (see tests/matrix.test.ts and task-17-report.md).
+ * Escaped/collapsed rather than dropped, so the diagnostic text survives. */
 export function sanitize(text: string): string {
   let out = text.replace(/\/Users\/[^\s'"()]+/g, '[REDACTED_PATH]');
   const user = safeUsername();
   if (user.length > 0) out = out.split(user).join('[REDACTED_USER]');
+  out = out.replace(/\r\n|\r|\n/g, ' ').replace(/\s+/g, ' ').trim();
+  out = out.replace(/\|/g, '\\|');
   return out;
 }
 
@@ -241,25 +255,6 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIM
   }
 }
 
-export async function execCase(c: MatrixCase, opts: { timeoutMs: number; analyze: AnalyzeFn }): Promise<CaseExecution> {
-  const reason = skipReason(c);
-  if (reason) return { kind: 'skipped', reason };
-  try {
-    const result = await withTimeout(opts.analyze(c.url, { maxFrames: 20, ...c.opts }), opts.timeoutMs);
-    if (result === TIMEOUT_SENTINEL) return { kind: 'timeout', ms: opts.timeoutMs };
-    return {
-      kind: 'ran',
-      status: result.source.status,
-      frames: result.processing.selectedFrames,
-      candidates: result.processing.candidateFrames,
-      transcriptSource: result.transcript?.source ?? 'none',
-      peakRssMb: result.processing.peakRssMb,
-    };
-  } catch (e) {
-    return { kind: 'threw', message: e instanceof Error ? e.message : String(e) };
-  }
-}
-
 // Real videos over a real network can legitimately take a couple of minutes
 // (resolve + normalize + ASR + embedding, each a subprocess model load) --
 // generous enough not to punish a slow-but-healthy case, short enough that
@@ -287,7 +282,9 @@ let realAnalyze: AnalyzeFn | null = null;
  * `npm run build` before `npm run matrix` (see the npm script and the brief).
  *
  * Deferred (not a top-level import) so unit tests that inject their own
- * `analyze` never need dist/ to exist at all.
+ * `analyze` never need dist/ to exist at all. Also never called eagerly by
+ * runMatrix -- see execCase below, where the call site was moved after a
+ * code-review finding.
  */
 async function getRealAnalyze(): Promise<AnalyzeFn> {
   if (!realAnalyze) {
@@ -302,17 +299,58 @@ async function getRealAnalyze(): Promise<AnalyzeFn> {
   return realAnalyze;
 }
 
+export async function execCase(
+  c: MatrixCase,
+  opts: { timeoutMs: number; analyze?: AnalyzeFn; resolveAnalyze?: () => Promise<AnalyzeFn> },
+): Promise<CaseExecution> {
+  const reason = skipReason(c);
+  if (reason) return { kind: 'skipped', reason };
+  try {
+    // Resolving the real analyzeVideo (a dynamic import of dist/analyze.js)
+    // happens HERE -- after the skip check, inside this try/catch -- and
+    // nowhere else. A code-review finding caught an earlier version that
+    // resolved it unconditionally at the top of runMatrix, before any
+    // per-case skip check ran: on a fresh checkout dist/ does not exist
+    // (gitignored, no build/postinstall hook creates it), so that version
+    // threw ERR_MODULE_NOT_FOUND and crashed the whole process before
+    // writing ANY document at all -- even when every configured case would
+    // have skipped anyway for want of a URL. That is precisely the "nothing
+    // configured" state this task exists to handle honestly. Placing the
+    // resolution here fixes both halves of that: it is never attempted for
+    // a case that would skip regardless, and if it DOES fail for a case
+    // that genuinely has a URL (e.g. `npm run build` was never run), the
+    // failure is caught by the same catch block as any other analyze()
+    // failure and surfaces as an honest FAIL row with a diagnostic message,
+    // not a crash with no document at all.
+    const analyze = opts.analyze ?? (await (opts.resolveAnalyze ?? getRealAnalyze)());
+    const result = await withTimeout(analyze(c.url, { maxFrames: 20, ...c.opts }), opts.timeoutMs);
+    if (result === TIMEOUT_SENTINEL) return { kind: 'timeout', ms: opts.timeoutMs };
+    return {
+      kind: 'ran',
+      status: result.source.status,
+      frames: result.processing.selectedFrames,
+      candidates: result.processing.candidateFrames,
+      transcriptSource: result.transcript?.source ?? 'none',
+      peakRssMb: result.processing.peakRssMb,
+    };
+  } catch (e) {
+    return { kind: 'threw', message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function runMatrix(
   cases: MatrixCase[] = CASES,
-  opts: { timeoutMs?: number; outFile?: string; analyze?: AnalyzeFn; now?: () => Date } = {},
+  opts: {
+    timeoutMs?: number; outFile?: string; analyze?: AnalyzeFn; now?: () => Date;
+    resolveAnalyze?: () => Promise<AnalyzeFn>;
+  } = {},
 ): Promise<MatrixResult[]> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const analyze = opts.analyze ?? (await getRealAnalyze());
   const outFile = opts.outFile ?? DEFAULT_OUT_FILE;
 
   const results: MatrixResult[] = [];
   for (const c of cases) {
-    const exec = await execCase(c, { timeoutMs, analyze });
+    const exec = await execCase(c, { timeoutMs, analyze: opts.analyze, resolveAnalyze: opts.resolveAnalyze });
     const result = toMatrixResult(c, exec);
     results.push(result);
     console.log(formatConsoleLine(result));

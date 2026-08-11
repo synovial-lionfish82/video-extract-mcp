@@ -210,6 +210,46 @@ describe('sanitize', () => {
   it('leaves ordinary text without paths or the username unchanged', () => {
     expect(sanitize('auth_required: sign in to continue')).toBe('auth_required: sign in to continue');
   });
+
+  it('escapes pipe characters and collapses newlines/carriage returns to spaces (Finding 2)', () => {
+    // Bug this catches: a raw '|' or line break surviving into a markdown
+    // table cell, corrupting the row's column count once rendered -- found
+    // in code review, reproduced against the pre-fix code (see
+    // task-17-report.md): a message with 6 raw pipes and one embedded
+    // newline turned a 9-column row into 16 raw-pipe-delimited fragments
+    // split across two output lines.
+    const out = sanitize('a|b\nc\r\nd|||e');
+    expect(out).not.toMatch(/[\r\n]/);
+    expect(out).not.toMatch(/(?<!\\)\|/); // no UNescaped pipe survives
+    expect(out).toContain('\\|'); // but the pipes are preserved, escaped -- not silently dropped
+  });
+});
+
+describe('formatRow -- table-structural characters in a thrown message (Finding 2)', () => {
+  it('keeps a threw row at exactly 9 cells (10 unescaped pipes) and free of raw newlines for a realistic pipe-and-newline-heavy error', () => {
+    // Reproduces the code-review finding's exact message shape -- realistic
+    // for ffmpeg/yt-dlp stderr, which is routinely multi-line and pipe-heavy,
+    // and sits outside analyzeVideo's try/catch (src/analyze.ts:57-58) so it
+    // can reach here verbatim as a thrown Error's .message. Verified directly
+    // against the pre-fix sanitize(): this exact message produced a row with
+    // 16 raw pipe characters and an embedded newline instead of the correct
+    // 10 pipes / 0 newlines (see task-17-report.md for the literal capture).
+    const nasty = 'usage: tool --a=1|--b=2 failed | exit 1\nsecond line of stderr | more pipes |||';
+    const row = formatRow(toMatrixResult(CASE, { kind: 'threw', message: nasty }));
+
+    expect(row.includes('\n')).toBe(false);
+    expect(row.includes('\r')).toBe(false);
+
+    // A well-formed 9-column row has exactly 10 unescaped '|' delimiters,
+    // regardless of what the free-text Status cell contains -- this is what
+    // guarantees any compliant table parser recovers exactly 9 cells, so the
+    // true trailing Pass token is never truncated off the end or replaced by
+    // some other column's content landing in its place.
+    const unescapedPipeCount = (row.match(/(?<!\\)\|/g) ?? []).length;
+    expect(unescapedPipeCount).toBe(10);
+
+    expect(row).toContain('\\|'); // the message's own pipes are preserved, escaped
+  });
 });
 
 describe('summarize', () => {
@@ -313,6 +353,38 @@ describe('execCase', () => {
     }
     expect(sawUnhandled).toBe(false);
   });
+
+  it('never resolves the real analyzeVideo when the case is skipped (Finding 1)', async () => {
+    // Bug this catches: resolving the real analyzeVideo (a dynamic import of
+    // dist/analyze.js) unconditionally before the skip check runs. On a
+    // fresh checkout dist/ does not exist (gitignored, no build hook), so
+    // that ordering threw ERR_MODULE_NOT_FOUND for a case that would have
+    // skipped anyway -- reproduced for real by moving dist/ aside and
+    // running `npx tsx scripts/matrix.ts` with no env vars: it crashed with
+    // exit 1 and wrote no document at all (see task-17-report.md for the
+    // literal capture). resolveAnalyze here stands in for that dynamic
+    // import without touching the real filesystem.
+    const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
+      throw new Error('simulated: dist/analyze.js not found (no build yet)');
+    });
+    const exec = await execCase({ ...CASE, url: '' }, { timeoutMs: 1000, resolveAnalyze });
+    expect(exec.kind).toBe('skipped');
+    expect(resolveAnalyze).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed real-analyze resolution as an honest FAIL row, not an uncaught crash (Finding 1)', async () => {
+    // For a case that IS configured (has a URL), a failure to resolve the
+    // real analyzeVideo (e.g. `npm run build` was never run) must still
+    // produce a row -- not propagate out of execCase uncaught, which would
+    // abort the whole matrix run with no document written at all.
+    const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
+      throw new Error('simulated: dist/analyze.js not found (no build yet)');
+    });
+    const exec = await execCase(CASE, { timeoutMs: 1000, resolveAnalyze });
+    expect(resolveAnalyze).toHaveBeenCalledTimes(1);
+    expect(exec.kind).toBe('threw');
+    if (exec.kind === 'threw') expect(exec.message).toContain('dist/analyze.js not found');
+  });
 });
 
 describe('runMatrix (wiring, no network)', () => {
@@ -350,5 +422,44 @@ describe('runMatrix (wiring, no network)', () => {
     const results = await runMatrix(blankCases, { analyze, outFile, timeoutMs: 1000 });
     expect(analyze).not.toHaveBeenCalled();
     expect(results.every((r) => r.outcome === 'SKIP')).toBe(true);
+  });
+
+  it('resolves cleanly and writes the honest all-skip document with NEITHER analyze NOR resolveAnalyze injected (Finding 1)', async () => {
+    // The literal "fresh checkout, nothing configured" scenario this task
+    // exists to handle: no injected analyze (so this exercises the real
+    // getRealAnalyze() code path), no M_* URLs. On THIS machine dist/
+    // happens to be built already, so this test alone cannot distinguish
+    // pre-fix from post-fix code -- both resolve dist/analyze.js
+    // successfully here, and pre-fix code merely left that reference
+    // unused once every case turned out to skip. The differential proof
+    // that the *ordering* bug is fixed lives in the resolveAnalyze-based
+    // tests (this describe block and the execCase describe above); this
+    // test pins the literal end-to-end contract as a real, no-mocks smoke
+    // test -- the same shape of call `npm run matrix` itself makes.
+    const blankCases = CASES.map((c) => ({ ...c, url: '' }));
+    const results = await runMatrix(blankCases, { outFile, timeoutMs: 1000 });
+    expect(results.every((r) => r.outcome === 'SKIP')).toBe(true);
+    const written = readFileSync(outFile, 'utf8');
+    expect(written).toContain(`0 of ${CASES.length} rows executed`);
+  });
+
+  it('never calls resolveAnalyze for any case when every URL is blank, even with no analyze injected (Finding 1, differential)', async () => {
+    // Bug this catches precisely: getRealAnalyze() (a dynamic import of
+    // dist/analyze.js, which does not exist on a fresh checkout -- gitignored,
+    // no build/postinstall hook creates it) being resolved unconditionally
+    // before any per-case skip check runs, crashing the whole process before
+    // writing any document. resolveAnalyze stands in for that dynamic import
+    // without touching the real filesystem, so this discriminates regardless
+    // of whether dist/ happens to exist on the machine running the test.
+    const resolveAnalyze = vi.fn(async (): Promise<AnalyzeFn> => {
+      throw new Error('simulated: dist/analyze.js not found (no build yet)');
+    });
+    const blankCases = CASES.map((c) => ({ ...c, url: '' }));
+    const results = await runMatrix(blankCases, { outFile, timeoutMs: 1000, resolveAnalyze });
+    expect(resolveAnalyze).not.toHaveBeenCalled();
+    expect(results.every((r) => r.outcome === 'SKIP')).toBe(true);
+    const written = readFileSync(outFile, 'utf8');
+    expect(written).toContain(`0 of ${CASES.length} rows executed`);
+    expect(written.toUpperCase()).toContain('UNPROVEN');
   });
 });
