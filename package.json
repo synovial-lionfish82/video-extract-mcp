@@ -7,8 +7,10 @@
     "doc": "docs"
   },
   "scripts": {
+    "pretest": "npm run build",
     "test": "vitest run",
     "build": "tsc",
+    "typecheck": "npm run build && tsc --noEmit -p tsconfig.typecheck.json",
     "preflight": "tsx scripts/preflight.ts",
     "cli": "tsx src/cli.ts",
     "matrix": "tsx scripts/matrix.ts"

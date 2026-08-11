@@ -288,12 +288,9 @@ let realAnalyze: AnalyzeFn | null = null;
  */
 async function getRealAnalyze(): Promise<AnalyzeFn> {
   if (!realAnalyze) {
-    // dist/ has no .d.ts (tsconfig sets no "declaration" option), so this
-    // specifier is untypeable on its own; the cast recovers real types from
-    // the structurally-identical TS source, which IS covered by tsconfig's
-    // `include` and so fully type-checked by `npm run build`.
-    // @ts-expect-error -- dist/analyze.js has no declaration file.
-    const mod = await import('../dist/analyze.js') as typeof import('../src/analyze.js');
+    // dist/ now ships .d.ts files (tsconfig "declaration": true), so this
+    // specifier types itself directly -- no cast through the TS source needed.
+    const mod = await import('../dist/analyze.js');
     realAnalyze = mod.analyzeVideo;
   }
   return realAnalyze;

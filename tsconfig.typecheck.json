@@ -1,0 +1,15 @@
+{
+  // Type-checks EVERYTHING -- src, scripts and tests -- with no emit.
+  // The root tsconfig only covers src/ (it drives the dist/ build), so
+  // tests/ and scripts/ were never type-checked before this file existed.
+  // Requires dist/ to be built first (`npm run typecheck` does this): tests
+  // deliberately import the compiled dist/ modules, and their types resolve
+  // through the .d.ts files the build now emits ("declaration": true).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": "."
+  },
+  "include": ["src", "scripts", "tests"]
+}
