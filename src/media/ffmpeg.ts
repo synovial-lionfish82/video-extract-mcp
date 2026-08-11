@@ -28,7 +28,11 @@ export async function normalize(input: string, workDir: string) {
   const audio = join(workDir, 'work.wav');
   const v = await run('ffmpeg', [
     '-y', '-i', input,
-    '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease",
+    // force_divisible_by=2: aspect-preserving downscale of a portrait input
+    // (1080x1920 -> 405x720) otherwise yields an ODD width, which libx264 +
+    // yuv420p rejects outright ("Invalid argument") -- a guaranteed
+    // first-contact failure on TikTok/Reels/Shorts-shaped sources.
+    '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
     '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', video,
   ]);
   if (v.code !== 0) throw new Error(`normalize(video) failed: ${v.stderr.slice(-400)}`);

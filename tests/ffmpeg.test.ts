@@ -50,6 +50,30 @@ describe('ffmpeg layer', () => {
     expect(existsSync(out)).toBe(true);
     expect(statSync(out).size).toBeGreaterThan(0);
   });
+  it('normalizes a portrait (odd-scaled) video to even dimensions (TikTok/Reels/Shorts shape)', async () => {
+    // 1080x1920 portrait: the aspect-preserving 720p cap yields 405x720 --
+    // an ODD width -- and libx264 with yuv420p rejects odd dimensions with an
+    // opaque "Invalid argument". Every other fixture in this repo is
+    // even-dimensioned, so only a portrait input can catch this. The fixture
+    // is generated at runtime (committed .mp4 files are gitignored).
+    const portrait = join(dir, 'portrait.mp4');
+    const r = await run('ffmpeg', [
+      '-y', '-f', 'lavfi', '-i', 'color=c=red:s=1080x1920:d=2',
+      '-vf', 'drawgrid=w=40:h=40:t=3:c=black@0.6',
+      '-r', '25', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', portrait,
+    ]);
+    expect(r.code).toBe(0);
+    const workDir = join(dir, 'portrait-work');
+    mkdirSync(workDir, { recursive: true });
+    const { video } = await normalize(portrait, workDir);
+    expect(existsSync(video)).toBe(true);
+    const vp = await probe(video);
+    expect(vp.width % 2).toBe(0);
+    expect(vp.height % 2).toBe(0);
+    expect(vp.height).toBeLessThanOrEqual(720);
+    expect(vp.width).toBeLessThanOrEqual(1280);
+  }, 60_000);
+
   it('handles audio absence: silent video produces no audio file', async () => {
     // Create a fixture with no audio stream (colour source only, no anullsrc)
     const noAudioFixture = join(dir, 'silent.mp4');
