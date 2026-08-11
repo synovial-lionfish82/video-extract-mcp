@@ -1,13 +1,13 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { analyzeVideo } from './analyze.js';
 import { getFrame, getClip } from './primitives.js';
 import { resolve } from './resolve/index.js';
+import { isMainModule } from './util/entry.js';
 
 export const TOOL_NAMES = ['analyze_video', 'resolve_video', 'get_frame', 'get_clip'] as const;
 
@@ -169,10 +169,9 @@ async function main(): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-// pathToFileURL (not a bare `file://${process.argv[1]}` template), matching
-// the established convention in src/cli.ts and scripts/preflight.ts: import.
-// meta.url is always percent-encoded, while naive template concatenation of
-// process.argv[1] is not, so a checkout path containing a space -- like this
-// repository's own ".../Xcode progects/extract tools" -- would otherwise
-// never compare equal and this guard would silently never fire.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void main();
+// isMainModule (src/util/entry.ts) realpaths both sides, covering the two
+// known silent-failure shapes of this guard: percent-encoded spaces in the
+// checkout path (this repository's own) AND symlinked invocation paths,
+// where Node realpaths the main module but argv[1] stays as typed -- the
+// server would otherwise exit 0 without ever connecting its transport.
+if (isMainModule(import.meta.url)) void main();

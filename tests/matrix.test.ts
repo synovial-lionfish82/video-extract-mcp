@@ -516,7 +516,13 @@ describe('runMatrix -- real subprocess, isolated copy with no dist/ (Finding 1, 
     // real project instead of erroring for a different reason first.
     writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
     cpSync(join(process.cwd(), 'scripts', 'matrix.ts'), join(root, 'scripts', 'matrix.ts'));
-    // Deliberately: no dist/, no src/ created under `root`.
+    // Deliberately: no dist/ created under `root`. Of src/, ONLY the entry
+    // guard helper is copied: matrix.ts's one runtime src/ import is
+    // src/util/entry.ts (isMainModule -- the symlink-robust entry guard);
+    // every other src/ import in it is `import type`, erased at transpile
+    // time. dist/ -- the thing this test is about -- stays genuinely absent.
+    mkdirSync(join(root, 'src', 'util'), { recursive: true });
+    cpSync(join(process.cwd(), 'src', 'util', 'entry.ts'), join(root, 'src', 'util', 'entry.ts'));
 
     const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(cleanEnv)) {

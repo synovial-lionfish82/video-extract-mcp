@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from '../src/util/entry.js';
 
 const pexec = promisify(execFile);
 
@@ -71,4 +71,7 @@ export async function main(): Promise<void> {
   if (results.some((r) => !r.ok)) process.exitCode = 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void main();
+// isMainModule realpaths both sides -- robust to the percent-encoded space
+// in this repo's own path AND to symlinked invocation paths (see
+// src/util/entry.ts).
+if (isMainModule(import.meta.url)) void main();

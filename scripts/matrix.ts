@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { pathToFileURL } from 'node:url';
 import type { AnalyzeOptions, Manifest, ResolveStatus } from '../src/types.js';
+import { isMainModule } from '../src/util/entry.js';
 
 // Implements spec §20 -- this IS the acceptance test for network-touching
 // behaviour. Sixteen earlier tasks proved the pipeline against a synthetic
@@ -357,16 +357,13 @@ export async function runMatrix(
   return results;
 }
 
-// Robust to spaces in the project path (this repo's own directory name
-// contains one): import.meta.url is always percent-encoded, while
-// process.argv[1] never is, so the naive `file://${process.argv[1]}`
-// comparison silently never matches here and this entry guard would never
-// fire -- `npm run matrix` would exit 0 having done nothing at all, with no
-// error and no document written. Verified empirically against this exact
-// checkout before writing this guard. Same fix already applied in
-// src/cli.ts, src/mcp.ts and scripts/preflight.ts; matched here rather than
-// reintroducing the bug those files already fixed once.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+// isMainModule (src/util/entry.ts) realpaths both sides: robust to the
+// percent-encoded space in this repo's own path (the original bug here --
+// `npm run matrix` exited 0 having written nothing) AND to symlinked
+// invocation paths, which defeated even the pathToFileURL comparison
+// because Node realpaths the main module while argv[1] stays as typed.
+// Same guard now used by src/cli.ts, src/mcp.ts and scripts/preflight.ts.
+if (isMainModule(import.meta.url)) {
   const results = await runMatrix();
   const s = summarize(results);
   console.log(`\n${s.executed} of ${s.total} rows executed (${s.skipped} skipped). Of executed: ${s.passed} passed, ${s.failed} failed, ${s.timedOut} timed out.`);
