@@ -60,7 +60,7 @@ describe('planCandidates', () => {
     expect(sceneSamples[1]!.sceneSignificance).toBeCloseTo(0.9, 5); // boundary at t=30
   });
 
-  it('clamps a near-end boundary to duration rather than dropping it', () => {
+  it('clamps a near-end boundary to just under duration, not exactly at it, rather than dropping it', () => {
     const plan = planCandidates(12, [{ time: 11.9, score: 0.9 }], { heartbeatSec: 5 });
     expect(plan.every((p) => p.timestamp <= 12)).toBe(true);
     // A naive "drop if timestamp+offset > duration" implementation would pass
@@ -68,7 +68,42 @@ describe('planCandidates', () => {
     // (clamped), rather than vanishing.
     const clamped = plan.find((p) => p.sceneSignificance > 0);
     expect(clamped).toBeDefined();
-    expect(clamped!.timestamp).toBe(12);
+    // Landing exactly on `duration` would make extractCandidates silently drop
+    // this candidate every time -- ffmpeg cannot seek to exact EOF and emit a
+    // frame (verified separately: seeking to t=duration fails, t=duration-0.1
+    // succeeds). The clamp must leave a margin, not touch the boundary.
+    expect(clamped!.timestamp).toBeLessThan(12);
+    expect(clamped!.timestamp).toBeGreaterThan(11.5);
+  });
+
+  it('falls back to the default heartbeat instead of looping forever when heartbeatSec is 0', () => {
+    // Regression test for a real defect: opts.heartbeatSec ?? 5 lets a
+    // caller-supplied 0 through unchanged (nullish coalescing only substitutes
+    // for null/undefined), and `for (let t = 0; t <= duration; t += 0)` never
+    // advances t, so `items` grows without bound. Against the pre-fix code
+    // this call does not return -- it runs the process out of memory. Against
+    // the fix it must return promptly with the same periodic output as the
+    // default heartbeat.
+    const plan = planCandidates(10, [], { heartbeatSec: 0 });
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.length).toBeLessThan(20); // sanity bound; this line is unreachable if t never advances
+    expect(plan.every((p) => p.sceneSignificance === 0)).toBe(true);
+    const times = plan.map((p) => p.timestamp);
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i]! - times[i - 1]!).toBeCloseTo(5, 5); // falls back to the 5s default
+    }
+  });
+
+  it('falls back to the default heartbeat for a negative heartbeatSec too', () => {
+    // t += heartbeatSec with a negative step moves t away from the t <= duration
+    // terminating condition just as surely as a zero step does.
+    const plan = planCandidates(10, [], { heartbeatSec: -5 });
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.length).toBeLessThan(20);
+    const times = plan.map((p) => p.timestamp);
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i]! - times[i - 1]!).toBeCloseTo(5, 5);
+    }
   });
 
   it('keeps the scene-derived candidate, not the heartbeat one, when timestamps collide', () => {

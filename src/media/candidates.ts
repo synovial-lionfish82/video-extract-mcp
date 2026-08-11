@@ -5,6 +5,11 @@ import { extractFrame } from './ffmpeg.js';
 
 export interface CandidatePlanItem { timestamp: number; sceneId: number; sceneSignificance: number; }
 
+// ffmpeg cannot seek to exactly EOF and still emit a frame (verified: seeking
+// to t=duration fails, t=duration-0.1 succeeds), so a boundary sample must
+// land strictly before duration, not exactly at it.
+const END_OF_VIDEO_MARGIN_SEC = 0.1;
+
 /**
  * Scene boundaries (sampled slightly AFTER the cut, spec §10) plus periodic
  * heartbeat frames so changes inside a static shot are still caught (spec §11).
@@ -14,13 +19,19 @@ export function planCandidates(
   boundaries: SceneBoundary[],
   opts: { heartbeatSec?: number; postBoundaryOffsetMs?: number } = {},
 ): CandidatePlanItem[] {
-  const heartbeatSec = opts.heartbeatSec ?? 5;
+  // opts.heartbeatSec ?? 5 would let a caller-supplied 0 (or a negative value)
+  // through unchanged -- nullish coalescing only substitutes for null/undefined
+  // -- and the heartbeat loop below never terminates when its step is <= 0,
+  // growing `items` without bound until the process dies of OOM. Any
+  // non-positive value falls back to the same default as "not specified".
+  const heartbeatSec = opts.heartbeatSec !== undefined && opts.heartbeatSec > 0 ? opts.heartbeatSec : 5;
   const offset = (opts.postBoundaryOffsetMs ?? 350) / 1000;
   const items: CandidatePlanItem[] = [];
+  const maxTimestamp = Math.max(0, duration - END_OF_VIDEO_MARGIN_SEC);
 
   const sorted = [...boundaries].sort((a, b) => a.time - b.time);
   sorted.forEach((b, i) => {
-    const t = Math.min(b.time + offset, duration);
+    const t = Math.min(b.time + offset, maxTimestamp);
     if (t <= duration) items.push({ timestamp: t, sceneId: i + 1, sceneSignificance: Math.min(1, b.score) });
   });
 
