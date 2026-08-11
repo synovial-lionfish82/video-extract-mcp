@@ -288,13 +288,16 @@ describe('execCase', () => {
     expect(exec.kind).toBe('threw');
   });
 
-  it('defuses a late rejection from the abandoned promise after a timeout (no unhandled rejection)', async () => {
-    // Regression test for a real bug found during implementation: when the
-    // timeout wins the race, the real analyze() promise is still pending and
-    // may reject later (e.g. a wedged child process eventually erroring). An
-    // unhandled rejection crashes the whole Node process by default, which
-    // would kill every row after the one that hung. Bug this catches: removing
-    // the defusing .catch() and reintroducing that crash.
+  it('never surfaces an unhandled rejection when analyze rejects after a timeout', async () => {
+    // Pins a safety property rather than regression-testing withTimeout's
+    // explicit p.catch() line specifically: verified directly (temporarily
+    // deleting that line and re-running this test) that it passes identically
+    // either way, because Promise.race([p, timeout]) already attaches its own
+    // rejection handler to `p` as part of racing it -- a late rejection is
+    // never actually "unhandled" regardless. The explicit catch in matrix.ts
+    // is kept as defense-in-depth against a future refactor that stops racing
+    // `p` directly; this test documents the property that must keep holding
+    // no matter which mechanism ends up providing it.
     let sawUnhandled = false;
     const onUnhandled = () => { sawUnhandled = true; };
     process.once('unhandledRejection', onUnhandled);

@@ -225,13 +225,18 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIM
     return await Promise.race([p, timeout]);
   } finally {
     clearTimeout(timer);
-    // If the timeout won the race, `p` is still pending and may reject later
-    // (a wedged child process eventually erroring). An unhandled rejection
-    // crashes the whole process by default -- one hung URL would then take
-    // the entire matrix run down instead of just that row. This does not
-    // cancel the underlying work (Node has no general promise cancellation);
-    // it only defuses a rejection nobody is listening for any more.
-    // Harmless no-op when `p` is the one that already won the race.
+    // Promise.race([p, timeout]) already attaches its own rejection handler
+    // to `p` as part of racing it (per spec it calls p.then(resolve, reject)
+    // on every promise in the list up front), so a late rejection from an
+    // abandoned `p` is never actually "unhandled" here even without the line
+    // below -- verified directly by temporarily deleting it and re-running
+    // tests/matrix.test.ts's differential check, which passed identically
+    // either way. Kept anyway as defense-in-depth: if withTimeout is ever
+    // rewritten to stop racing `p` directly (e.g. manual settle-tracking
+    // instead of Promise.race), this line is what would then stand between
+    // one hung URL's later rejection and an unhandled-rejection crash of the
+    // whole matrix run. Does not cancel the underlying work either way --
+    // Node has no general promise cancellation.
     p.catch(() => {});
   }
 }
