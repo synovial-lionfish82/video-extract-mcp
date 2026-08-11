@@ -67,15 +67,40 @@ export async function scoreQuality(imagePath: string): Promise<QualityScore> {
 /**
  * Scores every candidate and drops rejects. A candidate whose image can't
  * even be read (missing/corrupt file) is dropped the same way, rather than
- * failing the whole batch over one bad frame.
+ * failing the whole batch over one bad frame -- UNLESS every candidate in a
+ * non-empty batch fails to score. A few bad frames among otherwise-good ones
+ * is normal (a seek landed wrong, one file got truncated); every single one
+ * failing together is not a per-frame problem, it's systemic (a broken sharp
+ * install, a resource limit, an upstream extraction bug that corrupted the
+ * whole batch) -- and silently returning [] in that case would be
+ * indistinguishable downstream from "this video legitimately had no good
+ * frames". That case throws instead, naming the failure count and carrying
+ * the first underlying error's message.
+ *
+ * Only the *count* of failures is used to detect this, not the failure
+ * *type*: sharp's own errors carry no machine-readable code (verified
+ * directly -- a missing file, a corrupt header, a zero-byte file, and a
+ * directory passed as a path all throw a plain `Error` with only a
+ * human-readable `message`, no `.code`/`.errno`), so classifying by message
+ * text would mean pattern-matching library-internal wording that isn't a
+ * stable contract. The count is the only non-brittle signal available.
  */
 export async function filterCandidates(cands: Candidate[]): Promise<Candidate[]> {
   const kept: Candidate[] = [];
+  let failures = 0;
+  let firstError: unknown;
   for (const c of cands) {
     try {
       const q = await scoreQuality(c.imagePath);
       if (!q.reject) kept.push({ ...c, quality: q.quality });
-    } catch { /* unreadable frame is dropped */ }
+    } catch (e) {
+      failures++;
+      if (failures === 1) firstError = e;
+    }
+  }
+  if (cands.length > 0 && failures === cands.length) {
+    const detail = firstError instanceof Error ? firstError.message : String(firstError);
+    throw new Error(`filterCandidates: all ${failures} candidate(s) failed to score (first error: ${detail})`);
   }
   return kept;
 }

@@ -240,4 +240,59 @@ describe('filterCandidates', () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.imagePath).toBe(detailPath);
   });
+
+  it('drops an unreadable candidate AND a quality-rejected candidate in the same batch, keeping only the genuinely good one unchanged', async () => {
+    // Complements the test above: mixes a scoring ERROR (missingPath) with a
+    // legitimate quality REJECTION (blackPath, readable but too_dark) and a
+    // genuine accept (detailPath), in one batch. Proves the fix below (which
+    // counts errors to detect a systemic failure) does not conflate "readable
+    // but quality-rejected" with "failed to score" -- if it did, this 3-item
+    // batch (1 error + 1 reject + 1 accept, i.e. 1 of 3 failed, not 3 of 3)
+    // could wrongly trip a "some/all failed" throw, or the reject-counting
+    // could wrongly feed the failure counter and throw here too.
+    const cands: Candidate[] = [
+      cand(missingPath, { timestamp: 1 }),
+      cand(blackPath, { timestamp: 2 }),
+      cand(detailPath, { timestamp: 3 }),
+    ];
+    const out = await filterCandidates(cands);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.imagePath).toBe(detailPath);
+    expect(out[0]!.timestamp).toBe(3);
+  });
+
+  it('throws, naming the failure count and the first underlying error, when every candidate in a non-empty batch fails to score', async () => {
+    // The dangerous case: if sharp were systemically broken (bad native
+    // binding) or an upstream bug corrupted every frame in a batch, ALL
+    // scoreQuality calls would throw. The per-frame tolerance proven by the
+    // two tests above must not extend to this case -- a totally-failed batch
+    // silently returning [] is indistinguishable downstream from "this video
+    // legitimately had no good frames". This is the test that matters most
+    // for this fix. Confirmed (see task-7-report.md's fix-round section) to
+    // FAIL against the pre-fix implementation, which returns [] here instead
+    // of throwing.
+    const cands: Candidate[] = [
+      cand(missingPath, { timestamp: 1 }),
+      cand(join(dir, 'also-missing.jpg'), { timestamp: 2 }),
+      cand(join(dir, 'still-missing.jpg'), { timestamp: 3 }),
+    ];
+    let caught: unknown;
+    try {
+      await filterCandidates(cands);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toMatch(/3/); // names the failure count (3 of 3)
+    expect(message).toMatch(/Input file is missing/); // carries the first underlying error's own message
+  });
+
+  it('returns [] without throwing for an empty input array -- an empty batch is not a systemic failure', async () => {
+    // Guards the boundary the fix above must not cross: cands.length===0
+    // trivially satisfies "every candidate failed" (0 of 0) under a naive
+    // failures===cands.length check with no additional guard, which would
+    // make an empty batch throw. An empty batch is a no-op, not a failure.
+    await expect(filterCandidates([])).resolves.toEqual([]);
+  });
 });
