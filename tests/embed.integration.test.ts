@@ -24,13 +24,19 @@ describe.skipIf(!ready)('SigLIP embed worker (integration)', () => {
   it('returns 768-dim normalized vectors, NOT raw pixels', async () => {
     const { embedImages } = await import('../dist/vision/embed.js');
     const [a] = await embedImages([red]);
-    // 150528 = 224*224*3 is exactly what pipeline('image-feature-extraction')
-    // returns (raw preprocessed pixels) if it is ever substituted in place of
-    // SiglipVisionModel + pooler_output -- see task-12-brief.md's "THE TRAP".
-    // If this assertion ever reports 150528 instead of 768, the wrong API is
-    // in use and the frame selector would be deduplicating on raw pixels, not
-    // semantics.
-    expect(a!.length).toBe(768);
+    // TRAP GUARD -- the custom message below is the load-bearing part, not
+    // this comment: it must appear in the test's FAILURE OUTPUT so a future
+    // maintainer who "simplifies" to pipeline('image-feature-extraction')
+    // sees why it broke without having to go read this source file.
+    expect(
+      a!.length,
+      `got ${a!.length}-dim vector, expected 768. 150528 = 224*224*3 is what ` +
+      `pipeline('image-feature-extraction') returns -- raw preprocessed pixels, ` +
+      `NOT embeddings. That API silently "works" (cosine similarity over raw ` +
+      `pixels still looks plausible) while destroying the semantic signal this ` +
+      `tool depends on. Use SiglipVisionModel + pooler_output instead. See ` +
+      `task-12-brief.md, section "THE TRAP".`,
+    ).toBe(768);
     expect(Math.hypot(...a!)).toBeCloseTo(1, 3);
   }, 600_000);
 
