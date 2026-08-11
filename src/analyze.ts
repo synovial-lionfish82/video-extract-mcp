@@ -147,9 +147,24 @@ async function analyzeResolved(
         let segments = parseVtt(readFileSync(track.path, 'utf8'));
         if (opts.start !== undefined && opts.end !== undefined) {
           // Caption files carry ABSOLUTE full-video timestamps while the
-          // media here is a 0-based clip (whether the resolver applied the
-          // range or trim() did just above) -- re-base them or every
-          // transcriptWindow is shifted by `start` seconds.
+          // media here is normally a 0-based clip (whether the resolver
+          // applied the range or trim() did just above) -- re-base them or
+          // every transcriptWindow is shifted by `start` seconds. That is
+          // NOT true on the 'even'+start===end carve-out above: there
+          // clipRelative is false, trim() never ran, and both `video` and
+          // frame timestamps stay in ABSOLUTE time.
+          //
+          // KNOWN DEFECT, deliberately deferred (not fixed here): on that
+          // carve-out this clamp still runs and uses the wrong time base.
+          // clampSegmentsToRange(segs, start, start) collapses a caption
+          // straddling `start` to a zero-width {0,0} segment; attachTranscript
+          // then builds its window from the frame's ABSOLUTE timestamp, which
+          // never overlaps {0,0}, so the caption is silently dropped --
+          // transcript.segments is corrupted on that path, not just
+          // transcriptWindow. Fix direction: gate this call on
+          // `clipRelative` (the same flag stage 5-7 already uses) instead of
+          // on `opts.start`/`opts.end` alone. Owned by the task that
+          // rewrites the MCP layer.
           segments = clampSegmentsToRange(segments, opts.start, opts.end);
         }
         transcript = {
