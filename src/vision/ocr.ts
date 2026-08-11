@@ -165,8 +165,14 @@ async function ocrBuffer(buf: Buffer, langs: string): Promise<string> {
   const p = join(tmpdir(), `norma-ocr-${process.pid}-${Math.random().toString(36).slice(2)}.png`);
   await writeFile(p, buf);
   try {
-    const { stdout } = await run('tesseract', [p, 'stdout', '-l', langs], { timeoutMs: 30_000 });
+    // Failures PROPAGATE (spawn error rejects; nonzero exit -- missing
+    // language pack, timeout-kill's code -1 -- throws below) instead of
+    // being swallowed into ''. The caller (src/analyze.ts) records each
+    // failure in Manifest.processing.warnings; a genuinely textless crop
+    // still returns '' via a clean zero exit, so "no text" stays honest and
+    // a dead tesseract no longer masquerades as it.
+    const { stdout, stderr, code } = await run('tesseract', [p, 'stdout', '-l', langs], { timeoutMs: 30_000 });
+    if (code !== 0) throw new Error(`tesseract exited ${code}: ${stderr.slice(-200).trim()}`);
     return stdout.replace(/\s+/g, ' ').trim();
-  } catch { return ''; }
-  finally { await unlink(p).catch(() => {}); }
+  } finally { await unlink(p).catch(() => {}); }
 }

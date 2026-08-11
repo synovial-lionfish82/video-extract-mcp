@@ -61,7 +61,11 @@ export function buildServer(): McpServer {
         + 'resolve_video first only if you need a fast upfront check of whether a URL can be '
         + "extracted at all before committing to this tool's slower full pipeline -- note "
         + 'that resolve_video still downloads the full media itself, so calling it before '
-        + 'this tool on the same URL means downloading that video twice.',
+        + 'this tool on the same URL means downloading that video twice. Also check '
+        + 'processing.warnings: optional stages that failed and were degraded past (OCR, '
+        + 'image embeddings, speech recognition) each record an entry there, so an empty '
+        + 'transcript or missing on-screen text can be told apart from a healthy video that '
+        + 'simply has none.',
       inputSchema: {
         url: z.string().describe('Page or direct video URL to extract (e.g. a YouTube/TikTok/WeChat Channels link, or a direct .mp4/.m3u8 URL).'),
         start: z.number().optional().describe('Start second of the range to analyze -- provide together with end (start alone, or end alone, has no effect). Omit both to analyze the whole video.'),

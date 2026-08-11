@@ -34,8 +34,12 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   // updated as stages succeed, so a mid-pipeline throw still reports which
   // platform/title it got as far as resolving.
   const src = { platform: 'unknown', title: '', resolvedBy: 'none', duration: 0 };
+  // Silent-degrade trail (Manifest.processing.warnings): shared with the
+  // pipeline so degradations recorded before a later hard failure still
+  // reach the failure manifest.
+  const warnings: string[] = [];
   try {
-    return await analyzeResolved(url, opts, mode, rss, src);
+    return await analyzeResolved(url, opts, mode, rss, src, warnings);
   } catch (e) {
     // The documented contract (src/mcp.ts): analyze_video RETURNS a manifest
     // rather than throwing. Anything the stage-level handling below did not
@@ -45,7 +49,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
       url, platform: src.platform, title: src.title, duration: src.duration,
       resolvedBy: src.resolvedBy, status: 'extractor_failed',
       reason: `analysis failed: ${e instanceof Error ? e.message : String(e)}`,
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode, warnings,
     });
   } finally {
     // ALWAYS stop the sampler -- on the throw path above, but also as a
@@ -59,6 +63,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
 async function analyzeResolved(
   url: string, opts: AnalyzeOptions, mode: 'fast' | 'accurate', rss: PeakRssTracker,
   src: { platform: string; title: string; resolvedBy: string; duration: number },
+  warnings: string[],
 ): Promise<Manifest> {
   const maxFrames = opts.maxFrames ?? 35;
   const workDir = opts.outDir ?? mkdtempSync(join(tmpdir(), 'norma-'));
@@ -74,7 +79,7 @@ async function analyzeResolved(
     return buildManifest({
       url, platform: 'unknown', title: '', duration: 0, resolvedBy: res.resolvedBy ?? 'none',
       status: res.status, reason: typeof res.reason === 'string' ? res.reason : res.message,
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode, warnings,
     });
   }
   src.platform = res.platform; src.title = res.title;
@@ -127,7 +132,12 @@ async function analyzeResolved(
       // build per task-11-report.md), so wiring it through is what lets a
       // caller-declared language reach transcript.language honestly instead of
       // silently downgrading to 'auto'.
-      transcript = await transcribeAudio(audio, { engine, preferredLanguage: opts.preferredLanguage }).catch(() => null);
+      transcript = await transcribeAudio(audio, { engine, preferredLanguage: opts.preferredLanguage }).catch((e: unknown) => {
+        // Same silent-degrade class as OCR/embeddings below: a null
+        // transcript is otherwise indistinguishable from "no speech found".
+        warnings.push(`asr failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
     }
   }
 
@@ -156,9 +166,26 @@ async function analyzeResolved(
     cands = await filterCandidates(cands);
 
     const langs = engine === 'sensevoice' ? 'chi_sim+eng' : 'eng';
+    // Per-frame OCR failures degrade (empty text) but are RECORDED: a dead
+    // tesseract (missing binary, missing language pack) fails every frame
+    // and collapses to one summary warning; isolated per-frame failures are
+    // listed individually. ocrFrame/ocrBuffer now propagate real failures
+    // (nonzero tesseract exit, spawn error) instead of swallowing them into
+    // '' -- an empty string still means "no text seen", honestly.
+    const ocrFailures: string[] = [];
     for (const c of cands) {
-      const { content, subtitle } = await ocrFrame(c.imagePath, langs).catch(() => ({ content: '', subtitle: '' }));
-      c.ocrContent = content; c.ocrSubtitle = subtitle;
+      try {
+        const { content, subtitle } = await ocrFrame(c.imagePath, langs);
+        c.ocrContent = content; c.ocrSubtitle = subtitle;
+      } catch (e) {
+        c.ocrContent = ''; c.ocrSubtitle = '';
+        ocrFailures.push(`ocr failed for frame at ${c.timestamp.toFixed(2)}s: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (ocrFailures.length > 0 && ocrFailures.length === cands.length) {
+      warnings.push(`ocr unavailable: all ${cands.length} candidate frames failed (first: ${ocrFailures[0]})`);
+    } else {
+      warnings.push(...ocrFailures);
     }
     // One pass over the FULL surviving batch, not chunked: computeTextNovelty's
     // persistence check looks one candidate ahead to decide whether a text
@@ -173,12 +200,16 @@ async function analyzeResolved(
       url, platform: res.platform, title: res.title, duration: meta.duration,
       resolvedBy: res.resolvedBy, status: 'extractor_failed',
       reason: `candidate pipeline failed: ${e instanceof Error ? e.message : String(e)}`,
-      transcript, frames: [], candidateCount, peakRssMb: rss.stop(), mode,
+      transcript, frames: [], candidateCount, peakRssMb: rss.stop(), mode, warnings,
     });
   }
 
   // 6. Embeddings -- STAGE 2 (vision worker; ASR already exited)
-  const vectors = await embedImages(cands.map((c) => c.imagePath)).catch(() => [] as number[][]);
+  let embedError: string | null = null;
+  const vectors = await embedImages(cands.map((c) => c.imagePath)).catch((e: unknown) => {
+    embedError = e instanceof Error ? e.message : String(e);
+    return [] as number[][];
+  });
 
   // Guarded assignment: embedImages returns `[]` (never a dropped array
   // entry) in a candidate's slot when that one image failed to embed, to
@@ -216,6 +247,11 @@ async function analyzeResolved(
     // healthy video into an empty result.
     cands = cands.filter((c) => c.embedding !== undefined);
   }
+  if (embedError !== null) {
+    warnings.push(`embedding failed: ${embedError}`);
+  } else if (!anyEmbedded && cands.length > 0) {
+    warnings.push('embedding produced no vectors; similarity dedupe is disabled for this run');
+  }
 
   // 7. Select + align
   let frames = selectFrames(cands, maxFrames, meta.duration);
@@ -224,6 +260,6 @@ async function analyzeResolved(
   return buildManifest({
     url, platform: res.platform, title: res.title, duration: meta.duration,
     resolvedBy: res.resolvedBy, status: 'ok', filePath: video,
-    transcript, frames, candidateCount, peakRssMb: rss.stop(), mode,
+    transcript, frames, candidateCount, peakRssMb: rss.stop(), mode, warnings,
   });
 }

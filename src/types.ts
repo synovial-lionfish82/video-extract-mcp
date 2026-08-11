@@ -95,6 +95,14 @@ export interface Manifest {
   processing: {
     selectedFrames: number; candidateFrames: number;
     peakRssMb: number; selectorVersion: string; mode: AnalyzeMode;
+    /**
+     * Silent-degrade trail: each optional stage that failed and was degraded
+     * past (dead/failed OCR, failed embeddings, failed ASR) records one
+     * human-readable entry here. Empty on a fully-healthy run. Without this,
+     * a manifest with status 'ok' was indistinguishable from one produced
+     * with OCR and embeddings silently dead.
+     */
+    warnings: string[];
   };
 }
 

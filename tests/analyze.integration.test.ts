@@ -47,6 +47,10 @@ vi.mock('../dist/media/ffmpeg.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../dist/media/ffmpeg.js')>();
   return { ...real, normalize: vi.fn(real.normalize) };
 });
+vi.mock('../dist/vision/ocr.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../dist/vision/ocr.js')>();
+  return { ...real, ocrFrame: vi.fn(real.ocrFrame) };
+});
 
 // Imported AFTER the vi.mock calls above (textually and, more importantly,
 // semantically -- vitest hoists vi.mock factories ahead of all imports in
@@ -59,6 +63,7 @@ const { embedImages } = await import('../dist/vision/embed.js');
 const { filterCandidates } = await import('../dist/vision/quality.js');
 const { resolve } = await import('../dist/resolve/index.js');
 const { normalize } = await import('../dist/media/ffmpeg.js');
+const { ocrFrame } = await import('../dist/vision/ocr.js');
 
 /** A deterministic, distinct, already-unit-norm 768-dim vector per index. */
 function unitVec(i: number): number[] {
@@ -111,6 +116,9 @@ describe('analyzeVideo (local file, end to end)', () => {
     const maxSim = Math.max(...m.frames.map((f) => f.nearestSelectedSimilarity));
     console.log('[test1] processing:', JSON.stringify(m.processing), 'maxNearestSelectedSimilarity:', maxSim);
     expect(maxSim).toBeGreaterThan(0);
+    // A fully-healthy run records NO degradation warnings -- and the field
+    // itself must exist (the silent-degrade trail, review IMPORTANT-6).
+    expect(m.processing.warnings).toEqual([]);
   }, 900_000);
 
   it('returns a clean failure manifest for an unresolvable URL', async () => {
@@ -186,6 +194,15 @@ describe('analyzeVideo (local file, end to end)', () => {
       expect(m.frames.length).toBeGreaterThan(0);
       console.log('[staged] processing:', JSON.stringify(m.processing), 'transcript:', JSON.stringify(m.transcript));
       expect(m.processing.peakRssMb).toBeGreaterThan(0);
+      // Spec §4's memory bound, asserted -- not just printed. This is the
+      // architectural tripwire: the bound holds BECAUSE the two model stages
+      // run as sequential short-lived workers, so parallelising them (both
+      // models resident at once) is exactly the change this would catch.
+      // Honesty note: the fixture's audio is silent, so VAD short-circuits
+      // and Whisper's weights may never fully load -- the bound is loose
+      // here, a ceiling tripwire rather than proof of the worst-case peak
+      // (that proof is the acceptance matrix's job on real videos).
+      expect(m.processing.peakRssMb).toBeLessThan(2048);
     },
     900_000,
   );
@@ -309,6 +326,42 @@ describe('analyzeVideo -- issue 1: a failed embedding must not be preferentially
     // be 0 -- a healthy video with a merely-unavailable embedding stage would
     // silently produce no frames at all.
     expect(m.frames.length).toBeGreaterThan(0);
+    // ...and the degrade leaves a trace (IMPORTANT-6): status stays ok but
+    // the manifest says the diversity signal was lost.
+    expect(m.processing.warnings.some((w) => w.includes('embedding produced no vectors'))).toBe(true);
+  }, 120_000);
+});
+
+describe('analyzeVideo -- silent degrades leave a manifest trace (processing.warnings)', () => {
+  it('records a warning when the embedding stage rejects outright', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-warn-embed-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    vi.mocked(embedImages).mockImplementationOnce(async () => {
+      throw new Error('SIMULATED: embed worker crashed');
+    });
+    const m = await analyzeVideo(v, { maxFrames: 4, transcript: false, outDir: join(dir, 'out') });
+    expect(m.source.status).toBe('ok');
+    expect(m.processing.warnings.some((w) => w.includes('embedding failed') && w.includes('SIMULATED: embed worker crashed'))).toBe(true);
+  }, 120_000);
+
+  it('collapses a fully-dead OCR stage into one summary warning while keeping status ok', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-warn-ocr-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    vi.mocked(ocrFrame).mockImplementation(async () => {
+      throw new Error('SIMULATED: tesseract gone');
+    });
+    try {
+      const m = await analyzeVideo(v, { maxFrames: 4, transcript: false, outDir: join(dir, 'out') });
+      expect(ocrFrame).toHaveBeenCalled();
+      expect(m.source.status).toBe('ok');
+      expect(m.frames.length).toBeGreaterThan(0);
+      const ocrWarnings = m.processing.warnings.filter((w) => w.startsWith('ocr unavailable: all '));
+      expect(ocrWarnings).toHaveLength(1);
+      expect(ocrWarnings[0]).toContain('SIMULATED: tesseract gone');
+    } finally {
+      const real = await vi.importActual<typeof import('../dist/vision/ocr.js')>('../dist/vision/ocr.js');
+      vi.mocked(ocrFrame).mockImplementation(real.ocrFrame);
+    }
   }, 120_000);
 });
 
@@ -349,7 +402,18 @@ describe('buildManifest', () => {
     });
     expect(m.processing).toEqual({
       selectedFrames: 0, candidateFrames: 7, peakRssMb: 123, selectorVersion: SELECTOR_VERSION, mode: 'accurate',
+      warnings: [],
     });
+  });
+
+  it('threads warnings through and defaults them to an empty array', () => {
+    const base = {
+      url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok' as const,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast' as const,
+    };
+    expect(buildManifest(base).processing.warnings).toEqual([]);
+    expect(buildManifest({ ...base, warnings: ['ocr unavailable: boom'] }).processing.warnings)
+      .toEqual(['ocr unavailable: boom']);
   });
 
   it('omits `reason` entirely (not just undefined) when none is given', () => {

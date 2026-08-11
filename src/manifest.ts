@@ -6,6 +6,7 @@ export function buildManifest(p: {
   status: ResolveStatus; reason?: string; filePath?: string;
   transcript: Transcript | null; frames: SelectedFrame[];
   candidateCount: number; peakRssMb: number; mode: AnalyzeMode;
+  warnings?: string[];
 }): Manifest {
   return {
     source: {
@@ -21,6 +22,7 @@ export function buildManifest(p: {
       peakRssMb: p.peakRssMb,
       selectorVersion: SELECTOR_VERSION,
       mode: p.mode,
+      warnings: p.warnings ?? [],
     },
   };
 }
