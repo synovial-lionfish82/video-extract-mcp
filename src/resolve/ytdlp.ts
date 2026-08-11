@@ -1,6 +1,6 @@
 import { readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { VideoResolver, ResolveOptions, ResolveResult, ResolveFailure, CaptionTrack } from '../types.js';
+import type { VideoResolver, ResolveOptions, ResolveResult, ResolveFailure, CaptionTrack, VideoMetadata } from '../types.js';
 import { run } from '../util/run.js';
 import { probe } from '../media/ffmpeg.js';
 import { baseLang } from '../transcript/routing.js';
@@ -63,6 +63,13 @@ export interface YtDlpMeta {
   automatic_captions?: Record<string, SubtitleFormat[]>;
   requested_subtitles?: Record<string, { ext?: string }> | null;
   http_headers?: Record<string, string>;
+  chapters?: Array<{ start_time?: number; end_time?: number; title?: string }>;
+  description?: string | null;
+  uploader?: string | null;
+  channel?: string | null;
+  upload_date?: string | null;
+  view_count?: number | null;
+  comment_count?: number | null;
 }
 
 const PARSEABLE_SUB_EXTS = new Set(['vtt', 'srt']);
@@ -96,6 +103,26 @@ export function orderByLanguagePreference(
     .map((lang, i) => ({ lang, i, tier: tier(lang), orig: /-orig$/i.test(lang) ? 0 : 1 }))
     .sort((a, b) => a.tier - b.tier || a.orig - b.orig || a.i - b.i)
     .map((x) => x.lang);
+}
+
+/** Spec §9. Chapters compose with range extraction: an agent reads them,
+ *  then analyzes only the section that matters. */
+export function toVideoMetadata(meta: YtDlpMeta): VideoMetadata {
+  const raw = Array.isArray(meta.chapters) ? meta.chapters : [];
+  return {
+    title: meta.title ?? '',
+    creator: meta.uploader ?? meta.channel ?? null,
+    duration: meta.duration ?? 0,
+    chapters: raw.map((c) => ({
+      start: c.start_time ?? 0,
+      end: c.end_time ?? 0,
+      title: c.title ?? '',
+    })),
+    description: meta.description ?? null,
+    uploadDate: meta.upload_date ?? null,
+    viewCount: meta.view_count ?? null,
+    commentCount: meta.comment_count ?? null,
+  };
 }
 
 /**
@@ -183,6 +210,9 @@ export class YtDlpResolver implements VideoResolver {
       args.push('--download-sections', `*${opts.start}-${opts.end}`, '--force-keyframes-at-cuts');
     }
 
+    // Comments can be very slow on popular videos (spec §2.1).
+    if (opts.comments) args.push('--write-comments');
+
     const r = await run('yt-dlp', [...args, url], { timeoutMs: 15 * 60_000 });
     if (r.code !== 0) return classifyYtDlpError(r.stderr);
 
@@ -217,6 +247,9 @@ export class YtDlpResolver implements VideoResolver {
       captions: { manual, auto },
       languageHint: meta.language ?? null,
       rangeApplied,
+      metadata: toVideoMetadata(meta),
+      clipStart: wantsRange ? opts.start : undefined,
+      clipEnd: wantsRange ? opts.end : undefined,
     };
   }
 }
