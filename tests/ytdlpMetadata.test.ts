@@ -36,4 +36,11 @@ describe('toVideoMetadata', () => {
   it('tolerates a malformed chapters value instead of throwing', () => {
     expect(toVideoMetadata({ chapters: 'nope' as never }).chapters).toEqual([]);
   });
+  it('carries comments through when present', () => {
+    const comments = [{ id: '1', text: 'great!' }, { id: '2', text: 'thanks' }];
+    expect(toVideoMetadata({ comments }).comments).toEqual(comments);
+  });
+  it('leaves comments undefined when absent', () => {
+    expect(toVideoMetadata({}).comments).toBeUndefined();
+  });
 });

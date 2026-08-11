@@ -70,6 +70,7 @@ export interface YtDlpMeta {
   upload_date?: string | null;
   view_count?: number | null;
   comment_count?: number | null;
+  comments?: unknown[];
 }
 
 const PARSEABLE_SUB_EXTS = new Set(['vtt', 'srt']);
@@ -109,7 +110,7 @@ export function orderByLanguagePreference(
  *  then analyzes only the section that matters. */
 export function toVideoMetadata(meta: YtDlpMeta): VideoMetadata {
   const raw = Array.isArray(meta.chapters) ? meta.chapters : [];
-  return {
+  const result: VideoMetadata = {
     title: meta.title ?? '',
     creator: meta.uploader ?? meta.channel ?? null,
     duration: meta.duration ?? 0,
@@ -123,6 +124,8 @@ export function toVideoMetadata(meta: YtDlpMeta): VideoMetadata {
     viewCount: meta.view_count ?? null,
     commentCount: meta.comment_count ?? null,
   };
+  if (meta.comments !== undefined) result.comments = meta.comments;
+  return result;
 }
 
 /**
@@ -248,8 +251,8 @@ export class YtDlpResolver implements VideoResolver {
       languageHint: meta.language ?? null,
       rangeApplied,
       metadata: toVideoMetadata(meta),
-      clipStart: wantsRange ? opts.start : undefined,
-      clipEnd: wantsRange ? opts.end : undefined,
+      clipStart: wantsRange && rangeApplied ? opts.start : undefined,
+      clipEnd: wantsRange && rangeApplied ? opts.end : undefined,
     };
   }
 }

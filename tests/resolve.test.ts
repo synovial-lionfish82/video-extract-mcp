@@ -8,7 +8,7 @@ import { YtDlpResolver } from '../src/resolve/ytdlp.js';
 import {
   WeChatHeadlessResolver, parseShareLink, classifyBusinessError, businessFailure,
 } from '../src/resolve/wechat.js';
-import { makeTestVideo } from '../src/media/ffmpeg.js';
+import { makeTestVideo, probe } from '../src/media/ffmpeg.js';
 import { run } from '../src/util/run.js';
 
 // Passthrough by default (vi.fn wrapping the real implementation) so every
@@ -272,6 +272,29 @@ describe('YtDlpResolver caption acquisition against a faked yt-dlp (hermetic, no
     expect(readFileSync(r.captions.auto!.path, 'utf8')).toBe(VTT_BODY);
     const fetchMock = vi.mocked(globalThis.fetch);
     expect(fetchMock).toHaveBeenCalledWith('https://captions.example/fr.vtt', expect.anything());
+  });
+
+  it('leaves clipStart/clipEnd undefined when a range was requested but not applied by yt-dlp', async () => {
+    // Spec §5.1: range download is an optimization, never a guarantee. If
+    // yt-dlp ignores --download-sections, rangeApplied is false and the file
+    // is complete, so clipStart/clipEnd must stay undefined (or a later layer
+    // would misread "this is the full file, sized for the full video" as "this
+    // is a clipped file from second 100 to 200").
+    vi.spyOn(await import('../src/media/ffmpeg.js'), 'probe').mockResolvedValueOnce({
+      duration: 1000, width: 1920, height: 1080, fps: 30,
+    }); // Duration doesn't match the 200-100=100 range
+    fakeYtDlp([], {
+      title: 'T', extractor: 'youtube',
+      subtitles: {}, automatic_captions: {}, requested_subtitles: null,
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', {
+      workDir, start: 100, end: 200,
+    });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.rangeApplied).toBe(false);
+    expect(r.clipStart).toBeUndefined();
+    expect(r.clipEnd).toBeUndefined();
   });
 });
 

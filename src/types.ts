@@ -17,6 +17,10 @@ export interface VideoMetadata {
   uploadDate: string | null;
   viewCount: number | null;
   commentCount: number | null;
+  /** Platform comments, written to the metadata file only (never surfaced inline).
+   *  Absent unless explicitly requested via ResolveOptions.comments. Comment structure
+   *  varies by extractor; not typed to avoid pinning to a specific schema. */
+  comments?: unknown[];
 }
 
 /**
