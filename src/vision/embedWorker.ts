@@ -11,8 +11,12 @@ async function main(): Promise<void> {
 
   const processor = await AutoProcessor.from_pretrained(MODEL_ID);
   // MUST be the vision tower read via pooler_output: pipeline('image-feature-extraction')
-  // returns raw preprocessed pixels (150528 = 224*224*3), not embeddings -- a
-  // silent, plausible-looking failure. See task-12-brief.md's "THE TRAP".
+  // returns the UN-POOLED per-patch hidden state instead (a 14x14=196 patch
+  // grid x 768 dims = 150528 values -- confirmed directly: SiglipVisionModel's
+  // own res.last_hidden_state has dims [1, 196, 768]), not the pooled 768-dim
+  // embedding. Similarity computed over it is dominated by low-level patch
+  // statistics, not the pooled semantic representation -- a silent,
+  // plausible-looking failure. See task-12-brief.md's "THE TRAP".
   // tests/embed.integration.test.ts asserts the 768-dim output specifically
   // to guard against this regression.
   const model = await SiglipVisionModel.from_pretrained(MODEL_ID, { dtype: 'q8' });

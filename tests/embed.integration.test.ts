@@ -30,10 +30,13 @@ describe.skipIf(!ready)('SigLIP embed worker (integration)', () => {
     // sees why it broke without having to go read this source file.
     expect(
       a!.length,
-      `got ${a!.length}-dim vector, expected 768. 150528 = 224*224*3 is what ` +
-      `pipeline('image-feature-extraction') returns -- raw preprocessed pixels, ` +
-      `NOT embeddings. That API silently "works" (cosine similarity over raw ` +
-      `pixels still looks plausible) while destroying the semantic signal this ` +
+      `got ${a!.length}-dim vector, expected 768. 150528 = 196*768 is what ` +
+      `pipeline('image-feature-extraction') actually returns for this model -- ` +
+      `the UN-POOLED per-patch hidden state (a 14x14=196 patch grid x 768 ` +
+      `dims), NOT the pooled embedding and NOT raw pixels either. Similarity ` +
+      `computed over it is dominated by low-level patch statistics, not the ` +
+      `pooled semantic representation, so it silently "works" (cosine ordering ` +
+      `can still look plausible) while destroying the semantic signal this ` +
       `tool depends on. Use SiglipVisionModel + pooler_output instead. See ` +
       `task-12-brief.md, section "THE TRAP".`,
     ).toBe(768);
@@ -45,8 +48,12 @@ describe.skipIf(!ready)('SigLIP embed worker (integration)', () => {
     const { cosine } = await import('../dist/vision/select.js');
     const [a, b, c] = await embedImages([red, red2, blue]);
     // Semantic-meaningfulness check. NOTE this alone cannot distinguish real
-    // SigLIP embeddings from raw pixels -- two bitwise-identical solid-color
-    // JPEGs would also score highest cosine similarity as raw pixel vectors.
+    // SigLIP embeddings from the trap. Confirmed directly by running
+    // pipeline('image-feature-extraction') against these same red/red2/blue
+    // fixtures: under the trap, cosine(red,red2) = 0.9999999999999566 and
+    // cosine(red,blue) = 0.8235119358344026 -- "same image" still outscores
+    // "different image" there too, so this test alone would pass just as
+    // readily whether the wrong or the right API is in use.
     // The 768-dim test above is the sole trap discriminator; this test only
     // establishes that whatever the vectors are, "same image" outscores
     // "different image", which is necessary but not sufficient on its own.
