@@ -55,14 +55,16 @@ Long video segment
 });
 
 describe('chooseCaptionTier', () => {
+  const manual = { path: 'a.vtt', language: 'en' };
+  const auto = { path: 'b.vtt', language: 'en' };
   it('always prefers manual captions', () => {
-    expect(chooseCaptionTier({ manual: 'a.vtt', auto: 'b.vtt' }, 'accurate')).toBe('manual');
-    expect(chooseCaptionTier({ manual: 'a.vtt', auto: null }, 'fast')).toBe('manual');
-    expect(chooseCaptionTier({ manual: 'a.vtt', auto: 'b.vtt' }, 'fast')).toBe('manual');
+    expect(chooseCaptionTier({ manual, auto }, 'accurate')).toBe('manual');
+    expect(chooseCaptionTier({ manual, auto: null }, 'fast')).toBe('manual');
+    expect(chooseCaptionTier({ manual, auto }, 'fast')).toBe('manual');
   });
   it('uses auto captions only in fast mode', () => {
-    expect(chooseCaptionTier({ manual: null, auto: 'b.vtt' }, 'fast')).toBe('auto');
-    expect(chooseCaptionTier({ manual: null, auto: 'b.vtt' }, 'accurate')).toBe('asr');
+    expect(chooseCaptionTier({ manual: null, auto }, 'fast')).toBe('auto');
+    expect(chooseCaptionTier({ manual: null, auto }, 'accurate')).toBe('asr');
   });
   it('falls back to asr when nothing exists', () => {
     expect(chooseCaptionTier({ manual: null, auto: null }, 'fast')).toBe('asr');

@@ -4,6 +4,14 @@ export type ResolveStatus =
 
 export type UnsupportedReason = 'drm_protected' | 'unsupported_link' | 'extractor_unsupported';
 
+/** One acquired caption file plus the language it is actually in. */
+export interface CaptionTrack {
+  /** Local path to the downloaded caption file (VTT, or SRT -- parseVtt reads both cue syntaxes). */
+  path: string;
+  /** Normalized base language of the track (e.g. 'en' for an 'en-US' tag), when known. */
+  language: string | null;
+}
+
 export interface ResolvedMedia {
   status: 'ok';
   filePath: string;
@@ -11,7 +19,7 @@ export interface ResolvedMedia {
   title: string;
   duration: number;
   resolvedBy: 'ytdlp' | 'direct' | 'wechat';
-  captions: { manual: string | null; auto: string | null };
+  captions: { manual: CaptionTrack | null; auto: CaptionTrack | null };
   languageHint: string | null;
   /** True when the resolver already trimmed to the requested range. */
   rangeApplied: boolean;
@@ -26,7 +34,11 @@ export interface ResolveFailure {
 
 export type ResolveResult = ResolvedMedia | ResolveFailure;
 
-export interface ResolveOptions { start?: number; end?: number; workDir: string; }
+export interface ResolveOptions {
+  start?: number; end?: number; workDir: string;
+  /** Caller's language preference -- steers which caption track a resolver picks. */
+  preferredLanguage?: string;
+}
 
 export interface VideoResolver {
   readonly name: string;

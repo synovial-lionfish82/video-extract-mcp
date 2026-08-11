@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyYtDlpError, pickResolver } from '../src/resolve/index.js';
@@ -9,6 +9,17 @@ import {
   WeChatHeadlessResolver, parseShareLink, classifyBusinessError, businessFailure,
 } from '../src/resolve/wechat.js';
 import { makeTestVideo } from '../src/media/ffmpeg.js';
+import { run } from '../src/util/run.js';
+
+// Passthrough by default (vi.fn wrapping the real implementation) so every
+// other suite in this file -- and makeTestVideo's own ffmpeg calls -- keep
+// running real subprocesses; the yt-dlp caption suite overrides it per-test
+// to fake ONLY the yt-dlp binary.
+vi.mock('../src/util/run.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/util/run.js')>();
+  return { ...real, run: vi.fn(real.run) };
+});
+const realRun = (await vi.importActual<typeof import('../src/util/run.js')>('../src/util/run.js')).run;
 
 describe('classifyYtDlpError', () => {
   it('maps DRM messages to unsupported/drm_protected', () => {
@@ -154,6 +165,113 @@ describe('businessFailure (pure logic, no network)', () => {
     // (e.g. a fall-through default branch), which would make every successful stage 2/3 call
     // in resolve() incorrectly short-circuit into a failure.
     expect(businessFailure(null)).toBeNull();
+  });
+});
+
+describe('YtDlpResolver caption acquisition against a faked yt-dlp (hermetic, no live calls)', () => {
+  // Fakes ONLY the yt-dlp subprocess; ffprobe (and any other binary) runs for
+  // real, so the media file yt-dlp "produced" is genuinely probed. The faked
+  // stdout JSON mirrors what the installed yt-dlp 2026.7.4 actually prints
+  // (verified against its source): `--print-json` emits the sanitized info
+  // dict BEFORE _write_subtitles runs, so `requested_subtitles` carries
+  // ext/url but NO filepath, and subtitle files land as `source.<lang>.<ext>`
+  // -- there is no `.auto.` filename infix, ever.
+  let fixtureVideo: string;
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-ytdlp-fixture-'));
+    fixtureVideo = await makeTestVideo(join(dir, 'fixture.mp4'), 3);
+  }, 30_000);
+
+  let workDir: string;
+  beforeEach(() => { workDir = mkdtempSync(join(tmpdir(), 'norma-ytdlp-work-')); });
+  afterEach(() => { vi.mocked(run).mockImplementation(realRun); vi.unstubAllGlobals(); });
+
+  const VTT_BODY = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello from captions\n';
+
+  /** Fake a yt-dlp invocation: writes the media + given subtitle files into
+   *  workDir and prints the given info-dict JSON, exactly like the real
+   *  binary's --print-json --no-simulate flow. */
+  function fakeYtDlp(subFiles: string[], meta: Record<string, unknown>) {
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      copyFileSync(fixtureVideo, join(workDir, 'source.mp4'));
+      for (const f of subFiles) writeFileSync(join(workDir, f), VTT_BODY);
+      return { stdout: `${JSON.stringify(meta)}\n`, stderr: '', code: 0 };
+    });
+  }
+
+  it('classifies an auto-captions-only video as AUTO, never manual (the accuracy-bias inversion)', async () => {
+    // Real yt-dlp behaviour for a video with only auto captions under the
+    // OLD invocation (--write-subs --write-auto-subs --sub-langs all):
+    // the auto track is written as source.en.vtt -- no infix -- and the old
+    // filename-based findCaption classified it as MANUAL, so accurate mode
+    // used it directly and stamped transcript.source: "manual".
+    fakeYtDlp(['source.en.vtt'], {
+      title: 'T', extractor: 'youtube', language: 'en',
+      subtitles: {},
+      automatic_captions: { en: [{ ext: 'vtt', data: VTT_BODY, name: 'English' }] },
+      requested_subtitles: null,
+      http_headers: { 'User-Agent': 'test-agent' },
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.captions.manual).toBeNull();
+    expect(r.captions.auto).not.toBeNull();
+    expect(readFileSync(r.captions.auto!.path, 'utf8')).toBe(VTT_BODY);
+  });
+
+  it('selects the caption language deliberately: English beats readdir-order Arabic when no preference is given', async () => {
+    // Old behaviour: files.find over readdir order -- source.ar.vtt sorts
+    // before source.en.vtt, so the Arabic track won.
+    fakeYtDlp(['source.ar.vtt', 'source.en.vtt'], {
+      title: 'T', extractor: 'youtube', language: null,
+      subtitles: { ar: [{ ext: 'vtt', url: 'https://x/ar' }], en: [{ ext: 'vtt', url: 'https://x/en' }] },
+      automatic_captions: {},
+      requested_subtitles: { ar: { ext: 'vtt' }, en: { ext: 'vtt' } },
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.captions.manual).not.toBeNull();
+    expect(r.captions.manual!.path.endsWith('source.en.vtt')).toBe(true);
+    expect(r.captions.manual!.language).toBe('en');
+  });
+
+  it('honours preferredLanguage over English for manual caption choice', async () => {
+    fakeYtDlp(['source.en.vtt', 'source.ja.vtt'], {
+      title: 'T', extractor: 'youtube', language: 'en',
+      subtitles: { en: [{ ext: 'vtt', url: 'https://x/en' }], ja: [{ ext: 'vtt', url: 'https://x/ja' }] },
+      automatic_captions: {},
+      requested_subtitles: { en: { ext: 'vtt' }, ja: { ext: 'vtt' } },
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir, preferredLanguage: 'ja' });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.captions.manual!.path.endsWith('source.ja.vtt')).toBe(true);
+    expect(r.captions.manual!.language).toBe('ja');
+  });
+
+  it('fetches the chosen auto track by URL (bounded) when the metadata carries no inline data', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(VTT_BODY, { status: 200 })));
+    fakeYtDlp([], {
+      title: 'T', extractor: 'youtube', language: 'fr',
+      subtitles: {},
+      automatic_captions: {
+        ar: [{ ext: 'vtt', url: 'https://captions.example/ar.vtt' }],
+        'fr-orig': [{ ext: 'vtt', url: 'https://captions.example/fr.vtt' }],
+      },
+      requested_subtitles: null,
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.captions.manual).toBeNull();
+    // language hint 'fr' must beat readdir/metadata order 'ar'
+    expect(r.captions.auto!.language).toBe('fr');
+    expect(readFileSync(r.captions.auto!.path, 'utf8')).toBe(VTT_BODY);
+    const fetchMock = vi.mocked(globalThis.fetch);
+    expect(fetchMock).toHaveBeenCalledWith('https://captions.example/fr.vtt', expect.anything());
   });
 });
 

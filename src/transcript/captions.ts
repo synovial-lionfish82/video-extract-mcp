@@ -1,4 +1,4 @@
-import type { TranscriptSegment, AnalyzeMode } from '../types.js';
+import type { TranscriptSegment, AnalyzeMode, CaptionTrack } from '../types.js';
 
 const CUE = /(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/;
 
@@ -31,7 +31,7 @@ export function parseVtt(vtt: string): TranscriptSegment[] {
 
 /** Spec §9: accuracy-biased. Auto captions are only trusted in fast mode. */
 export function chooseCaptionTier(
-  captions: { manual: string | null; auto: string | null },
+  captions: { manual: CaptionTrack | null; auto: CaptionTrack | null },
   mode: AnalyzeMode,
 ): 'manual' | 'auto' | 'asr' {
   if (captions.manual) return 'manual';

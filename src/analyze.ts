@@ -37,8 +37,10 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   const framesDir = join(workDir, 'frames');
   mkdirSync(framesDir, { recursive: true });
 
-  // 1. Resolve
-  const res = await resolve(url, { start: opts.start, end: opts.end, workDir });
+  // 1. Resolve (preferredLanguage steers which caption track a resolver picks)
+  const res = await resolve(url, {
+    start: opts.start, end: opts.end, workDir, preferredLanguage: opts.preferredLanguage,
+  });
   if (res.status !== 'ok') {
     return buildManifest({
       url, platform: 'unknown', title: '', duration: 0, resolvedBy: res.resolvedBy ?? 'none',
@@ -67,9 +69,15 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   if (opts.transcript !== false) {
     const tier = chooseCaptionTier(res.captions, mode);
     if (tier !== 'asr') {
-      const file = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
-      if (existsSync(file)) {
-        transcript = { language: res.languageHint ?? 'unknown', source: tier, segments: parseVtt(readFileSync(file, 'utf8')) };
+      const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
+      if (existsSync(track.path)) {
+        transcript = {
+          // The TRACK's own language, not the video's: a deliberately-picked
+          // English caption file for a French video is in English.
+          language: track.language ?? res.languageHint ?? 'unknown',
+          source: tier,
+          segments: parseVtt(readFileSync(track.path, 'utf8')),
+        };
       }
     }
     if (!transcript && existsSync(audio)) {
