@@ -9,12 +9,17 @@ export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions }
   const opts: AnalyzeOptions = { mode: 'accurate' };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
-    const next = (): string => argv[++i] ?? '';
-    if (a === '--start') opts.start = Number(next());
-    else if (a === '--end') opts.end = Number(next());
-    else if (a === '--max-frames') opts.maxFrames = Number(next());
-    else if (a === '--lang') opts.preferredLanguage = next();
-    else if (a === '--out') opts.outDir = next();
+    // argv[++i] is undefined once no token remains -- distinct from a
+    // deliberately-empty '' value, so a flag truncated at the end of argv
+    // (a bare trailing `--start` with nothing after it) leaves the option
+    // unset instead of silently coercing to 0 (Number('') === 0 is
+    // indistinguishable from an explicit `--start 0`).
+    const next = (): string | undefined => argv[++i];
+    if (a === '--start') { const v = next(); if (v !== undefined) opts.start = Number(v); }
+    else if (a === '--end') { const v = next(); if (v !== undefined) opts.end = Number(v); }
+    else if (a === '--max-frames') { const v = next(); if (v !== undefined) opts.maxFrames = Number(v); }
+    else if (a === '--lang') { const v = next(); if (v !== undefined) opts.preferredLanguage = v; }
+    else if (a === '--out') { const v = next(); if (v !== undefined) opts.outDir = v; }
     else if (a === '--fast') opts.mode = 'fast';
     else if (a === '--no-transcript') opts.transcript = false;
   }

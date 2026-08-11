@@ -54,6 +54,14 @@ describe('parseArgs', () => {
     expect(opts.preferredLanguage).toBe('--fast');
     expect(opts.mode).toBe('accurate');
   });
+
+  it('a numeric flag with no following value does not silently become 0', () => {
+    // Number('') is 0, so a `--start` truncated at the end of argv (no value
+    // token left) previously set opts.start = 0 -- indistinguishable from an
+    // explicit `--start 0`, silently changing behaviour for a truncated command.
+    const { opts } = parseArgs(['u', '--start']);
+    expect(opts.start).toBeUndefined();
+  });
 });
 
 describe('power primitives', () => {
@@ -79,19 +87,33 @@ describe('power primitives', () => {
     expect(statSync(p).size).toBeGreaterThan(0);
   }, 60_000);
 
-  it('getFrame handles a timestamp well past the duration without an opaque throw', async () => {
-    const p = await getFrame(video, 14, dir); // duration(9) + 5
+  it('getFrame succeeds for a timestamp slightly past duration, naming the file from the timestamp actually used', async () => {
+    const p = await getFrame(video, 9.2, dir); // 9.0s fixture, 0.2s past duration -- a genuine near-EOF seek
     expect(existsSync(p)).toBe(true);
     expect(statSync(p).size).toBeGreaterThan(0);
+    // Must be named from the clamped timestamp actually extracted (duration
+    // - retreat = 9 - 0.1 = 8.9), not the originally requested 9.2 -- a file
+    // named after the request when the request wasn't what was extracted
+    // actively misrepresents which instant it depicts.
+    expect(basename(p)).toBe('frame_8.90.jpg');
+  }, 60_000);
+
+  it('getFrame throws, naming both the requested timestamp and the actual duration, for a wildly out-of-range request', async () => {
+    // Reproduces the reviewer's exact repro: a request 100000s into a 9s
+    // video must not silently succeed with a plausible-looking wrong frame.
+    const err = await getFrame(video, 100000, dir).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toContain('100000');
+    expect(msg).toContain('9'); // the fixture's probed duration
   }, 60_000);
 
   it('getClip at fps=1 over a 3s window returns exactly 3 frames, in order', async () => {
-    // Separate output dir per fps value: getClip's file prefix is
-    // `clip_${start}_${end}_` and does NOT include fps, so two calls with
-    // the same start/end sharing one directory would silently contaminate
-    // each other's file counts (stale files from one call surviving into
-    // the other's readdir scan). Empirically confirmed via a standalone
-    // ffmpeg run before writing this test.
+    // Each fps value still gets its own output dir here, for clarity of
+    // which files belong to which call -- but getClip itself is now safe
+    // against outDir reuse across different fps values regardless (its file
+    // prefix includes fps and clears stale matches before writing; see the
+    // dedicated contamination-regression test below for the same-dir case).
     const frames = await getClip(video, 2, 5, 1, join(dir, 'fps1'));
     expect(frames).toHaveLength(3);
     expect(frames.every((f) => existsSync(f) && statSync(f).size > 0)).toBe(true);
@@ -99,7 +121,7 @@ describe('power primitives', () => {
     // (fps ignored/hardcoded) and OUT-OF-ORDER results (reversed/shuffled)
     // in a single assertion, since any reordering changes this array.
     expect(frames.map((f) => basename(f))).toEqual([
-      'clip_2_5_0001.jpg', 'clip_2_5_0002.jpg', 'clip_2_5_0003.jpg',
+      'clip_2_5_1_0001.jpg', 'clip_2_5_1_0002.jpg', 'clip_2_5_1_0003.jpg',
     ]);
   }, 120_000);
 
@@ -108,8 +130,8 @@ describe('power primitives', () => {
     expect(frames).toHaveLength(6);
     expect(frames.every((f) => existsSync(f) && statSync(f).size > 0)).toBe(true);
     expect(frames.map((f) => basename(f))).toEqual([
-      'clip_2_5_0001.jpg', 'clip_2_5_0002.jpg', 'clip_2_5_0003.jpg',
-      'clip_2_5_0004.jpg', 'clip_2_5_0005.jpg', 'clip_2_5_0006.jpg',
+      'clip_2_5_2_0001.jpg', 'clip_2_5_2_0002.jpg', 'clip_2_5_2_0003.jpg',
+      'clip_2_5_2_0004.jpg', 'clip_2_5_2_0005.jpg', 'clip_2_5_2_0006.jpg',
     ]);
   }, 120_000);
 
@@ -123,5 +145,21 @@ describe('power primitives', () => {
     for (let i = 1; i < indices.length; i++) {
       expect(indices[i]).toBeGreaterThan(indices[i - 1] as number);
     }
+  }, 120_000);
+
+  it('getClip does not contaminate results when outDir is reused across calls with different fps', async () => {
+    // outDir reuse across calls is the intended coarse-to-fine usage pattern,
+    // not an edge case. Reproduces the reviewer's exact repro: a 4fps call
+    // followed by a 2fps call into the SAME directory over the SAME window
+    // must return exactly the second call's own 6 frames, not the first
+    // call's leftover 12 (the old prefix, `clip_${start}_${end}_`, had no
+    // fps component, so the second call's readdir scan silently absorbed
+    // the first call's stale files).
+    const shared = join(dir, 'shared-fps');
+    const first = await getClip(video, 2, 5, 4, shared);
+    expect(first).toHaveLength(12);
+    const second = await getClip(video, 2, 5, 2, shared);
+    expect(second).toHaveLength(6);
+    expect(second.every((f) => existsSync(f) && statSync(f).size > 0)).toBe(true);
   }, 120_000);
 });
