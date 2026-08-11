@@ -383,6 +383,12 @@ describe('analyzeVideo -- issue 2: filterCandidates throwing on total batch fail
     expect(m.source.status).not.toBe('ok');
     expect(m.frames).toEqual([]);
     expect(m.source.reason).toBeDefined();
+    // 'candidate pipeline failed' specifically -- the STAGE-level boundary
+    // added in Task 7 -- not merely any failure manifest: analyzeVideo now
+    // also has a top-level catch-all ('analysis failed: ...'), so a bare
+    // 'SIMULATED' check would pass even if the stage-level catch were
+    // deleted and the throw fell through to the outer one.
+    expect(m.source.reason).toContain('candidate pipeline failed');
     expect(m.source.reason).toContain('SIMULATED');
     // rss.stop() must still run on this path.
     expect(m.processing.peakRssMb).toBeGreaterThan(0);
