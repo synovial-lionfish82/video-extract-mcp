@@ -359,6 +359,10 @@ describe('WeChatHeadlessResolver.resolve() against a stubbed network (hermetic, 
     expect(existsSync(result.filePath)).toBe(true);
     expect(result.resolvedBy).toBe('wechat');
     expect(result.title).toBe('Tester');
+    // Documented platform prior (see download() in src/resolve/wechat.ts):
+    // without it the hint was null and the wechat->SenseVoice ASR route
+    // could never trigger via the resolver alone.
+    expect(result.languageHint).toBe('zh');
     // The data handoff the two-step flow depends on: step 2's wx_export_id must be echoed back
     // as the SINGULAR `exportId` string in step 3 -- the {exportIds:[...]} array form is a
     // documented, previously-hit real bug (business-code 500 from findergetobjecturl).

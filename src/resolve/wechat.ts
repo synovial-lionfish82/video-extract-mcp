@@ -1,10 +1,8 @@
-import { createWriteStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { join } from 'node:path';
 import type { VideoResolver, ResolveOptions, ResolveResult, ResolveFailure } from '../types.js';
 import { probe } from '../media/ffmpeg.js';
+import { fetchToFile, MEDIA_DOWNLOAD_TIMEOUT_MS } from '../util/download.js';
 
 /**
  * WeChat Channels (视频号) headless resolver.
@@ -346,21 +344,33 @@ export class WeChatHeadlessResolver implements VideoResolver {
   private async download(mediaUrl: string, opts: ResolveOptions, title: string): Promise<ResolveResult> {
     const out = join(opts.workDir, 'source.mp4');
     try {
-      const res = await fetch(mediaUrl);
-      if (res.status === 404) {
+      // Bounded (unlike the API calls' short 15s REQUEST_TIMEOUT_MS, a media
+      // body legitimately takes minutes): a stalled CDN aborts into the
+      // catch below instead of hanging analyze_video indefinitely.
+      const dl = await fetchToFile(mediaUrl, out, { timeoutMs: MEDIA_DOWNLOAD_TIMEOUT_MS });
+      if (dl.status === 404) {
         return { status: 'not_found', resolvedBy: 'wechat', message: 'Media URL returned HTTP 404.' };
       }
-      if (!res.ok || !res.body) {
+      if (!dl.ok) {
         // Not auth_required/auth_expired: the yuanbao cookie does not apply to this URL (it is
         // self-authenticated by its own token+sign params), so re-authenticating would not help.
         // A failure here more likely means the token/sign expired between resolve and download.
-        return { status: 'extractor_failed', resolvedBy: 'wechat', message: `HTTP ${res.status} downloading media` };
+        return { status: 'extractor_failed', resolvedBy: 'wechat', message: `HTTP ${dl.status} downloading media` };
       }
-      await pipeline(Readable.fromWeb(res.body as never), createWriteStream(out));
       const p = await probe(out);
       return {
         status: 'ok', filePath: out, platform: 'wechat_channels', title, duration: p.duration,
-        resolvedBy: 'wechat', captions: { manual: null, auto: null }, languageHint: null,
+        // languageHint 'zh' is a documented PLATFORM PRIOR, not a per-video
+        // measurement: WeChat Channels (视频号) is a Chinese-market platform
+        // whose API exposes no per-video language field, and its content is
+        // overwhelmingly Mandarin. This is exactly spec §9's "reliable
+        // source metadata says so" clause: it routes ASR to SenseVoice
+        // (whose model card is zh/yue/ja/ko/en -- it still transcribes the
+        // occasional English clip) and OCR to chi_sim+eng. Without it the
+        // hint was null and the WeChat->SenseVoice path could never trigger.
+        // A caller's explicit preferredLanguage still outranks it in
+        // chooseAsrEngine.
+        resolvedBy: 'wechat', captions: { manual: null, auto: null }, languageHint: 'zh',
         rangeApplied: false,
       };
     } catch (e) {
