@@ -4,6 +4,38 @@ export type ResolveStatus =
 
 export type UnsupportedReason = 'drm_protected' | 'unsupported_link' | 'extractor_unsupported';
 
+export type FrameMode = 'key' | 'even' | 'none';
+
+export interface Chapter { start: number; end: number; title: string; }
+
+export interface VideoMetadata {
+  title: string;
+  creator: string | null;
+  duration: number;
+  chapters: Chapter[];
+  description: string | null;
+  uploadDate: string | null;
+  viewCount: number | null;
+  commentCount: number | null;
+}
+
+/**
+ * Spec §2.2: `frames` is the documented control, but a zero (or negative)
+ * budget means the same thing as 'none' and must not error -- an agent
+ * reasoning about budgets may reach for the number before the enum.
+ * An explicit mode always wins, so `frames:'even', maxFrames:0` stays
+ * 'even' and is caught later by the range validation rather than silently
+ * becoming a transcript-only call.
+ */
+export function resolveFrameMode(
+  frames: FrameMode | undefined,
+  maxFrames: number | undefined,
+): FrameMode {
+  if (frames !== undefined) return frames;
+  if (maxFrames !== undefined && maxFrames <= 0) return 'none';
+  return 'key';
+}
+
 /** One acquired caption file plus the language it is actually in. */
 export interface CaptionTrack {
   /** Local path to the downloaded caption file (VTT, or SRT -- parseVtt reads both cue syntaxes). */
@@ -23,6 +55,11 @@ export interface ResolvedMedia {
   languageHint: string | null;
   /** True when the resolver already trimmed to the requested range. */
   rangeApplied: boolean;
+  /** Platform metadata for resolve_video's inline result (spec §9). */
+  metadata?: VideoMetadata;
+  /** Applied range against the ORIGINAL video, when one was (spec §5.1). */
+  clipStart?: number;
+  clipEnd?: number;
 }
 
 export interface ResolveFailure {
@@ -36,8 +73,11 @@ export type ResolveResult = ResolvedMedia | ResolveFailure;
 
 export interface ResolveOptions {
   start?: number; end?: number; workDir: string;
-  /** Caller's language preference -- steers which caption track a resolver picks. */
   preferredLanguage?: string;
+  /** Spec §2.1: metadata-only by default; media is the opt-in. */
+  returnVideo?: boolean;
+  /** Spec §2.1: can be very slow on popular videos. */
+  comments?: boolean;
 }
 
 export interface VideoResolver {
@@ -94,7 +134,7 @@ export interface Manifest {
   frames: SelectedFrame[];
   processing: {
     selectedFrames: number; candidateFrames: number;
-    peakRssMb: number; selectorVersion: string; mode: AnalyzeMode;
+    peakRssMb: number; selectorVersion: string; frameMode: FrameMode;
     /**
      * Silent-degrade trail: each optional stage that failed and was degraded
      * past (dead/failed OCR, failed embeddings, failed ASR) records one
@@ -110,5 +150,10 @@ export type AnalyzeMode = 'fast' | 'accurate';
 
 export interface AnalyzeOptions {
   start?: number; end?: number; maxFrames?: number; transcript?: boolean;
-  preferredLanguage?: string; mode?: AnalyzeMode; outDir?: string;
+  frames?: FrameMode;
+  /** Explicit override; outranks platform metadata (spec §4). */
+  language?: string;
+  preferredLanguage?: string;
+  destinationPath?: string;
+  outDir?: string;
 }
