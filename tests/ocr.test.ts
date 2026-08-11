@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import sharp from 'sharp';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -11,6 +11,47 @@ import type { Candidate } from '../src/types.js';
 const cand = (over: Partial<Candidate>): Candidate => ({
   timestamp: 0, sceneId: 0, imagePath: 'x.jpg', sceneSignificance: 0, quality: 1, ...over,
 });
+
+// ---------------------------------------------------------------------------
+// Canonical MUST-KEEP examples from the design intent (review round 2,
+// finding 1): a chart value changing inside a table, and one code line
+// changing inside a block. Both are constructed with a SINGLE changed
+// token-pair against a majority-unique surrounding vocabulary -- verified
+// below, not assumed -- so they actually exercise dilution: a repeated
+// filler token would silently shrink the measured symmetric difference and
+// make the test pass for the wrong reason.
+// ---------------------------------------------------------------------------
+
+// 32 tokens, all unique (verified: measure-canonical.ts reported 32/32
+// unique on each side before this fix). "$12m"/"$27m" appear nowhere else in
+// the sentence.
+const chartA = "quarterly review meeting notes discussed regional sales performance across north and south divisions with steady upward trends noted by senior leadership Revenue: $12M total reported for the fiscal period under normal conditions";
+const chartB = "quarterly review meeting notes discussed regional sales performance across north and south divisions with steady upward trends noted by senior leadership Revenue: $27M total reported for the fiscal period under normal conditions";
+
+// ~10 lines / 39 tokens, 23 unique (repeats are realistic code tokens like
+// "=", "let", "total" -- fine, they sit in the intersection). The changed
+// tokens ("0" removed, "calculate_total(items)" added) are each unique to
+// that one line and appear nowhere else in the block.
+const codeA = `function processOrder(order) {
+  const items = order.items
+  const customer = order.customer
+  total = 0
+  let discount = getDiscount(customer)
+  let tax = calculateTax(order)
+  let shipping = getShippingCost(order)
+  let finalAmount = total + tax + shipping - discount
+  return finalAmount
+}`;
+const codeB = `function processOrder(order) {
+  const items = order.items
+  const customer = order.customer
+  total = calculate_total(items)
+  let discount = getDiscount(customer)
+  let tax = calculateTax(order)
+  let shipping = getShippingCost(order)
+  let finalAmount = total + tax + shipping - discount
+  return finalAmount
+}`;
 
 // ---------------------------------------------------------------------------
 // Pure-logic tests: classifyTextRegion, normalizeText, textDelta, and
@@ -57,6 +98,65 @@ describe('textDelta', () => {
     // no constant return value can also satisfy this 0 -- kills "textDelta
     // returns a constant".
     expect(textDelta('Total = 0', 'total   =  0')).toBe(0);
+  });
+});
+
+describe('textDelta (review round 2, finding 1: dilution)', () => {
+  // Measured against the PRE-fix implementation (see task-8-report.md
+  // addendum): textDelta(chartA, chartB) = 0.0606, textDelta(codeA, codeB) =
+  // 0.0833 -- both far below the 0.3 HIGH bar. A pooled ratio over the whole
+  // token set dilutes a single-token edit by the size of the surrounding
+  // document; the fix must register a LOCALIZED change strongly regardless
+  // of how much unchanged text surrounds it. Catches: a measure that still
+  // divides the changed-token count by the total vocabulary size instead of
+  // saturating on the absolute count of changed tokens.
+  it('registers the canonical chart-value substitution embedded in ~30 tokens of unchanged text as HIGH', () => {
+    expect(textDelta(chartA, chartB)).toBeGreaterThan(0.3);
+  });
+
+  it('registers the canonical one-changed-line-in-a-code-block substitution as HIGH', () => {
+    expect(textDelta(codeA, codeB)).toBeGreaterThan(0.3);
+  });
+
+  it('still yields exactly 0 for identical text, at this length too', () => {
+    // Guards that the dilution fix didn't trade the false-negative (missed
+    // edit) for a false-positive (long identical text reading as changed).
+    expect(textDelta(chartA, chartA)).toBe(0);
+  });
+
+  it('still yields exactly 1 when text appears from nothing, at this length too', () => {
+    expect(textDelta('', chartA)).toBe(1);
+  });
+
+  it('still yields the wholesale-replacement ceiling for a SHORT completely-different text', () => {
+    // Catches a "fix" that solves dilution by replacing the Jaccard ratio
+    // outright with a raw count/K formula: for a short text (few tokens),
+    // count/K would UNDERSHOOT 1 even for 100% replacement (e.g. 2 changed
+    // tokens / K=3 = 0.667, not ~1), which would be a regression against the
+    // ALREADY-passing "textDelta is high for a changed value" test's spirit
+    // and against short caption-vs-caption wholesale swaps generally. The
+    // fix must keep (not replace) the property that zero token overlap ==
+    // maximal delta regardless of size.
+    expect(textDelta('hello there friend', 'goodbye now stranger')).toBe(1);
+  });
+
+  it('registers a modest genuinely-new addition (not just a substitution) as more than noise', () => {
+    // Two new tokens appended, nothing removed, nothing already present in
+    // chartA repeated ("plus" and "updates" do not appear in chartA).
+    expect(textDelta(chartA, chartA + ' plus updates')).toBeGreaterThan(0.1);
+  });
+
+  it('keeps a single localized substitution distinctly below a wholesale replacement -- not a step function', () => {
+    // Ordering test, mirroring the project's decisive-comparison pattern:
+    // proves the fix has genuine gradation rather than jumping straight to
+    // ~1 for ANY nonzero difference once token count clears the small
+    // saturating denominator. Catches an over-correction where the measure
+    // becomes "any difference at all = maximal", which would ALSO
+    // technically satisfy the two HIGH-novelty tests above for the wrong
+    // reason (everything reads as maximal, indiscriminately).
+    const localized = textDelta(chartA, chartB); // one token-pair changed
+    const wholesale = textDelta(chartA, 'zebra umbrella typewriter mountain velvet orchestra prism lantern');
+    expect(wholesale).toBeGreaterThan(localized);
   });
 });
 
@@ -158,6 +258,97 @@ describe('computeTextNovelty (spec §13)', () => {
   });
 });
 
+describe('computeTextNovelty (review round 2, finding 1: dilution)', () => {
+  // The acceptance criteria are phrased in terms of computeTextNovelty's
+  // output ("must yield HIGH novelty"), not just textDelta's, so these
+  // exercise the full path a real Candidate pair goes through -- not
+  // redundant with the textDelta-level tests above, since a bug introduced
+  // between textDelta and the final novelty value (e.g. a weight applied to
+  // the wrong term) would not be visible at the textDelta level at all.
+  it('gives HIGH novelty for the canonical chart-value MUST-KEEP example', () => {
+    const out = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: chartA, ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: chartB, ocrSubtitle: '' }),
+    ]);
+    expect(out[1]!.textNovelty!).toBeGreaterThan(0.3);
+  });
+
+  it('gives HIGH novelty for the canonical one-changed-line-in-a-code-block MUST-KEEP example', () => {
+    const out = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: codeA, ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: codeB, ocrSubtitle: '' }),
+    ]);
+    expect(out[1]!.textNovelty!).toBeGreaterThan(0.3);
+  });
+});
+
+describe('computeTextNovelty (review round 2, finding 2: persistence-aware content discount)', () => {
+  // Spatial discounting alone cannot tell an upper-third caption (churns
+  // every couple of seconds, spec's explicit "sometimes upper third" case)
+  // apart from a slide title (changes once, then holds) -- both sit in the
+  // content region, so spatial classification alone treats them
+  // identically. Persistence -- does the change hold into the NEXT
+  // candidate, or does it change again right away -- is what the finding
+  // says must discriminate them.
+  //
+  // NOTE on red/green: the "persists" test below is expected to ALREADY
+  // pass before this fix (a content change with nothing to compare against
+  // in the next candidate already got full weight under the pre-fix
+  // formula, which had no notion of "next" at all). Its purpose is not to
+  // fail pre-fix; it is the paired absolute-threshold half of the decisive
+  // ordering test, and it is what mutation 8 (persistence signal that
+  // ALWAYS discounts) fails against. The "churns" and "ranks" tests below
+  // ARE expected to fail pre-fix, since pre-fix there is no discount at all
+  // for a content-region change regardless of what happens next.
+  it('keeps FULL weight for a content change that PERSISTS into the next candidate (genuine change)', () => {
+    const out = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: 'intro title slide', ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: 'quarterly results overview', ocrSubtitle: '' }),
+      cand({ timestamp: 10, ocrContent: 'quarterly results overview', ocrSubtitle: '' }), // holds steady
+    ]);
+    expect(out[1]!.textNovelty!).toBeGreaterThan(0.3);
+  });
+
+  it('discounts a content change that CHURNS again in the next candidate (subtitle cadence, not a genuine change)', () => {
+    const out = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: 'intro title slide', ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: 'random caption words here', ocrSubtitle: '' }),
+      cand({ timestamp: 10, ocrContent: 'totally unrelated phrases now', ocrSubtitle: '' }), // churns again
+    ]);
+    expect(out[1]!.textNovelty!).toBeLessThan(0.15);
+  });
+
+  it('ranks a persisting content change above a churning content change (the decisive persistence behavior)', () => {
+    // Mirrors the project's established decisive-ordering-test pattern: an
+    // implementation that discounts everything, or nothing, or a constant
+    // amount regardless of what comes next, ties or inverts this ordering.
+    const persisting = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: 'intro title slide', ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: 'quarterly results overview', ocrSubtitle: '' }),
+      cand({ timestamp: 10, ocrContent: 'quarterly results overview', ocrSubtitle: '' }),
+    ])[1]!;
+    const churning = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: 'intro title slide', ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: 'random caption words here', ocrSubtitle: '' }),
+      cand({ timestamp: 10, ocrContent: 'totally unrelated phrases now', ocrSubtitle: '' }),
+    ])[1]!;
+    expect(persisting.textNovelty!).toBeGreaterThan(churning.textNovelty!);
+  });
+
+  it('does NOT discount a content change at the LAST candidate, where there is no next frame to test persistence against', () => {
+    // Documents a deliberate tradeoff (see src/vision/ocr.ts comment): with
+    // no future candidate to check, there is no evidence of churn, so we do
+    // not discount -- absence of evidence is not evidence of churn. This
+    // means a genuinely churning sequence's FINAL frame always gets full
+    // weight (a small, accepted budget-leak at the batch boundary).
+    const out = computeTextNovelty([
+      cand({ timestamp: 0, ocrContent: 'intro title slide', ocrSubtitle: '' }),
+      cand({ timestamp: 5, ocrContent: 'quarterly results overview', ocrSubtitle: '' }),
+    ]);
+    expect(out[1]!.textNovelty!).toBeGreaterThan(0.3);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ocrFrame: the real I/O boundary (sharp crop + tesseract subprocess). Per
 // the task's evidence-integrity bar, this is exercised against REAL
@@ -222,6 +413,14 @@ describe('ocrFrame', () => {
       oddPaths.push(p);
     }
   }, 30_000);
+
+  afterAll(() => {
+    // Review round 2, Minor: this mkdtempSync fixture directory was never
+    // cleaned up -- the reviewer found 25 leaked directories accumulated
+    // across runs. force:true so a missing/already-removed dir doesn't fail
+    // the suite.
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it('separates persistent content-region text from caption-band text', async () => {
     const { content, subtitle } = await ocrFrame(mixedPath);
