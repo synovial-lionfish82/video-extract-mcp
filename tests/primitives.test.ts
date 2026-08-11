@@ -31,11 +31,6 @@ describe('parseArgs', () => {
     expect(opts.outDir).toBe(outSentinel);
   });
 
-  it('defaults mode to accurate and supports --fast', () => {
-    expect(parseArgs(['u']).opts.mode).toBe('accurate');
-    expect(parseArgs(['u', '--fast']).opts.mode).toBe('fast');
-  });
-
   it('supports --no-transcript and leaves transcript unset (not false) by default', () => {
     expect(parseArgs(['u', '--no-transcript']).opts.transcript).toBe(false);
     expect(parseArgs(['u']).opts.transcript).toBeUndefined();
@@ -43,16 +38,19 @@ describe('parseArgs', () => {
 
   it('consumes the argv slot immediately after the flag, not an adjacent one', () => {
     // If value-lookup peeks at the next token without actually advancing the
-    // cursor past it, a value that itself looks like a flag (here "--fast",
-    // passed as the --lang value) is left in the stream and mis-read as a
-    // real flag on the next loop iteration -- flipping mode to 'fast' even
-    // though --fast never appeared as a token in its own right. A shift in
-    // the OTHER direction (skipping too far) would instead turn --lang's
-    // value into '--fast' being lost and NaN/'' propagating from the wrong
-    // slot. Either off-by-one direction is caught by this one case.
-    const { opts } = parseArgs(['u', '--lang', '--fast']);
-    expect(opts.preferredLanguage).toBe('--fast');
-    expect(opts.mode).toBe('accurate');
+    // cursor past it, a value that itself looks like a flag (here
+    // "--no-transcript", passed as the --lang value) is left in the stream
+    // and mis-read as a real flag on the next loop iteration -- flipping
+    // transcript to false even though --no-transcript never appeared as a
+    // token in its own right. A shift in the OTHER direction (skipping too
+    // far) would instead turn --lang's value into '--no-transcript' being
+    // lost and NaN/'' propagating from the wrong slot. Either off-by-one
+    // direction is caught by this one case. (Formerly used the now-removed
+    // --fast flag as the "looks like a flag" canary -- spec §2.2 dropped
+    // `mode` entirely, so --no-transcript takes over the same role here.)
+    const { opts } = parseArgs(['u', '--lang', '--no-transcript']);
+    expect(opts.preferredLanguage).toBe('--no-transcript');
+    expect(opts.transcript).toBeUndefined();
   });
 
   it('a numeric flag with no following value does not silently become 0', () => {

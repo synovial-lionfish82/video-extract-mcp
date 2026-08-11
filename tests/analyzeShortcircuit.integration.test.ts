@@ -1,0 +1,130 @@
+import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { makeTestVideo } from '../src/media/ffmpeg.js';
+
+const embedSpy = vi.fn();
+const asrSpy = vi.fn();
+vi.mock('../dist/vision/embed.js', async (orig) => {
+  const real = await orig<typeof import('../dist/vision/embed.js')>();
+  // Calling through with a spread `unknown[]` needs an escape-hatch cast.
+  // `never` (as literally given in the task brief) has no call signature at
+  // all -- vitest's type-stripped execution and the root tsconfig (tests/
+  // excluded) never notice, but `npm run typecheck` strict-checks tests/ and
+  // fails on it. `any` is callable and is what was clearly intended.
+  return { ...real, embedImages: (...a: unknown[]) => { embedSpy(); return (real.embedImages as any)(...a); } };
+});
+vi.mock('../dist/transcript/asr.js', async (orig) => {
+  const real = await orig<typeof import('../dist/transcript/asr.js')>();
+  // See the embedImages mock above: same `never` -> `any` fix.
+  return { ...real, transcribeAudio: (...a: unknown[]) => { asrSpy(); return (real.transcribeAudio as any)(...a); } };
+});
+// Wrapped (not replaced): every existing test in this file needs extractFrame
+// to genuinely run, since it's what 'even' sampling and candidate extraction
+// both call through to. Only the shortfall test below overrides one call.
+vi.mock('../dist/media/ffmpeg.js', async (orig) => {
+  const real = await orig<typeof import('../dist/media/ffmpeg.js')>();
+  return { ...real, extractFrame: vi.fn(real.extractFrame) };
+});
+
+let video: string; let dir: string;
+beforeAll(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'norma-sc-'));
+  video = await makeTestVideo(join(dir, 'v.mp4'), 9);
+}, 120_000);
+
+describe('early exits (spec §8)', () => {
+  it('a single-frame request runs no model stage at all', async () => {
+    embedSpy.mockClear(); asrSpy.mockClear();
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      start: 3, end: 3, maxFrames: 1, frames: 'even', transcript: false,
+      outDir: join(dir, 'one'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames).toHaveLength(1);
+    expect(embedSpy).not.toHaveBeenCalled();
+    expect(asrSpy).not.toHaveBeenCalled();
+  }, 300_000);
+
+  it('frames:none returns no frames and never embeds', async () => {
+    embedSpy.mockClear();
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      frames: 'none', transcript: false, outDir: join(dir, 'none'),
+    });
+    expect(m.frames).toEqual([]);
+    expect(m.processing.candidateFrames).toBe(0);
+    expect(embedSpy).not.toHaveBeenCalled();
+  }, 300_000);
+
+  it('frames:even skips scene detection and embeddings but still returns frames', async () => {
+    embedSpy.mockClear();
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      start: 1, end: 7, frames: 'even', maxFrames: 6, transcript: false,
+      outDir: join(dir, 'even'),
+    });
+    expect(m.frames).toHaveLength(6);
+    expect(embedSpy).not.toHaveBeenCalled();
+  }, 300_000);
+
+  it('frames:key still runs the full vision path', async () => {
+    embedSpy.mockClear();
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      frames: 'key', maxFrames: 3, transcript: false, outDir: join(dir, 'key'),
+    });
+    expect(m.frames.length).toBeGreaterThan(0);
+    expect(embedSpy).toHaveBeenCalled();
+  }, 300_000);
+});
+
+// task-3-brief.md's own reviewed follow-up (task-2-report.md, "minor
+// (deferred)"): sampleEven silently drops a timestamp whose extraction
+// fails, so a caller can end up with fewer frames than asked for with no
+// indication why. Manifest.processing.warnings exists precisely so a
+// healthy result is distinguishable from a silently degraded one.
+describe('even sampling shortfall warnings', () => {
+  it('does not spuriously warn when a single instant collapses a larger budget to one sample', async () => {
+    // evenTimestamps(5, 5, 10) legitimately returns exactly ONE stamp --
+    // that is not a shortfall, it is what a single-instant request means
+    // regardless of the budget. Comparing the actual frame count against
+    // the RAW maxFrames (10) instead of against what evenTimestamps itself
+    // planned (1) would wrongly flag this healthy result as degraded --
+    // catches an implementation that warns on `cands.length < maxFrames`.
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      start: 5, end: 5, maxFrames: 10, frames: 'even', transcript: false,
+      outDir: join(dir, 'instant-overbudget'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames).toHaveLength(1);
+    expect(m.processing.warnings).toEqual([]);
+  }, 300_000);
+
+  it('records a warning when even sampling genuinely extracts fewer frames than requested', async () => {
+    // Forces a real shortfall: 3 distinct timestamps are planned (clip-
+    // relative 0, 2, 4 across the trimmed [2,8) range), and the FIRST
+    // extraction is made to fail via the wrapped extractFrame -- the same
+    // "skip, don't abort the batch" contract sampleEven documents for a
+    // genuinely unseekable point. Catches an implementation that never
+    // compares actual output to what was planned at all (no warning ever
+    // recorded), or one that miscounts the shortfall.
+    const { extractFrame } = await import('../dist/media/ffmpeg.js');
+    vi.mocked(extractFrame).mockImplementationOnce(async () => {
+      throw new Error('SIMULATED: unseekable timestamp');
+    });
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      start: 2, end: 8, maxFrames: 3, frames: 'even', transcript: false,
+      outDir: join(dir, 'shortfall'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames).toHaveLength(2);
+    expect(
+      m.processing.warnings.some((w) => w.includes('requested 3') && w.includes('extracted 2')),
+    ).toBe(true);
+  }, 300_000);
+});

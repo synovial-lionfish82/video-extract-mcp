@@ -6,7 +6,7 @@ import { isMainModule } from './util/entry.js';
 
 export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions } {
   const url = argv[0] ?? '';
-  const opts: AnalyzeOptions = { mode: 'accurate' };
+  const opts: AnalyzeOptions = {};
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // argv[++i] is undefined once no token remains -- distinct from a
@@ -20,7 +20,6 @@ export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions }
     else if (a === '--max-frames') { const v = next(); if (v !== undefined) opts.maxFrames = Number(v); }
     else if (a === '--lang') { const v = next(); if (v !== undefined) opts.preferredLanguage = v; }
     else if (a === '--out') { const v = next(); if (v !== undefined) opts.outDir = v; }
-    else if (a === '--fast') opts.mode = 'fast';
     else if (a === '--no-transcript') opts.transcript = false;
   }
   return { url, opts };
@@ -29,7 +28,7 @@ export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions }
 async function main(): Promise<void> {
   const { url, opts } = parseArgs(process.argv.slice(2));
   if (!url) {
-    console.error('usage: norma <url> [--start S --end E] [--max-frames N] [--lang zh] [--fast] [--no-transcript] [--out DIR]');
+    console.error('usage: norma <url> [--start S --end E] [--max-frames N] [--lang zh] [--no-transcript] [--out DIR]');
     process.exit(1);
   }
   const manifest = await analyzeVideo(url, opts);

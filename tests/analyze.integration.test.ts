@@ -400,14 +400,14 @@ describe('buildManifest', () => {
     const m = buildManifest({
       url: 'https://x.com/v', platform: 'youtube', title: 'T', duration: 12.5,
       resolvedBy: 'ytdlp', status: 'ok',
-      transcript: null, frames: [], candidateCount: 7, peakRssMb: 123, mode: 'accurate',
+      transcript: null, frames: [], candidateCount: 7, peakRssMb: 123, frameMode: 'key',
     });
     expect(m.source).toEqual({
       url: 'https://x.com/v', platform: 'youtube', title: 'T', duration: 12.5,
       resolvedBy: 'ytdlp', status: 'ok',
     });
     expect(m.processing).toEqual({
-      selectedFrames: 0, candidateFrames: 7, peakRssMb: 123, selectorVersion: SELECTOR_VERSION, mode: 'accurate',
+      selectedFrames: 0, candidateFrames: 7, peakRssMb: 123, selectorVersion: SELECTOR_VERSION, frameMode: 'key',
       warnings: [],
     });
   });
@@ -415,7 +415,7 @@ describe('buildManifest', () => {
   it('threads warnings through and defaults them to an empty array', () => {
     const base = {
       url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok' as const,
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast' as const,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, frameMode: 'even' as const,
     };
     expect(buildManifest(base).processing.warnings).toEqual([]);
     expect(buildManifest({ ...base, warnings: ['ocr unavailable: boom'] }).processing.warnings)
@@ -425,7 +425,7 @@ describe('buildManifest', () => {
   it('omits `reason` entirely (not just undefined) when none is given', () => {
     const m = buildManifest({
       url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok',
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast',
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, frameMode: 'even',
     });
     expect('reason' in m.source).toBe(false);
   });
@@ -433,7 +433,7 @@ describe('buildManifest', () => {
   it('includes `reason` when one is given', () => {
     const m = buildManifest({
       url: 'u', platform: 'unknown', title: '', duration: 0, resolvedBy: 'none', status: 'not_found',
-      reason: 'nope', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'accurate',
+      reason: 'nope', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, frameMode: 'key',
     });
     expect(m.source.reason).toBe('nope');
   });
@@ -448,7 +448,7 @@ describe('buildManifest', () => {
     // being genuinely absent, which `'filePath' in m.source` verifies).
     const m = buildManifest({
       url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok',
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast',
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, frameMode: 'even',
     });
     expect('filePath' in m.source).toBe(false);
   });
@@ -456,7 +456,7 @@ describe('buildManifest', () => {
   it('includes `filePath` when one is given', () => {
     const m = buildManifest({
       url: 'u', platform: 'direct', title: 't', duration: 9, resolvedBy: 'direct', status: 'ok',
-      filePath: '/work/dir/work.mp4', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'accurate',
+      filePath: '/work/dir/work.mp4', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, frameMode: 'key',
     });
     expect(m.source.filePath).toBe('/work/dir/work.mp4');
   });

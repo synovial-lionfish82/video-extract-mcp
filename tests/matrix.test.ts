@@ -35,7 +35,7 @@ function fakeManifest(status: ResolveStatus, over: Partial<Parameters<typeof bui
   return buildManifest({
     url: 'https://example.com/v', platform: 'youtube', title: 'a title', duration: 10,
     resolvedBy: 'ytdlp', status, transcript: null, frames: [], candidateCount: 3,
-    peakRssMb: 512, mode: 'accurate', ...over,
+    peakRssMb: 512, frameMode: 'key', ...over,
   });
 }
 

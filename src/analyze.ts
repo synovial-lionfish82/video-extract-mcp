@@ -1,7 +1,8 @@
 import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AnalyzeOptions, Manifest, Transcript, Candidate } from './types.js';
+import type { AnalyzeOptions, Manifest, Transcript, Candidate, SelectedFrame, FrameMode } from './types.js';
+import { resolveFrameMode } from './types.js';
 import { resolve } from './resolve/index.js';
 import { probe, normalize, trim } from './media/ffmpeg.js';
 import { FFmpegSceneDetector } from './media/scenes.js';
@@ -10,6 +11,7 @@ import { filterCandidates } from './vision/quality.js';
 import { ocrFrame, computeTextNovelty } from './vision/ocr.js';
 import { embedImages } from './vision/embed.js';
 import { selectFrames } from './vision/select.js';
+import { sampleEven, evenTimestamps } from './vision/even.js';
 import { attachTranscript } from './align.js';
 import { parseVtt, chooseCaptionTier, clampSegmentsToRange } from './transcript/captions.js';
 import { chooseAsrEngine } from './transcript/routing.js';
@@ -27,7 +29,10 @@ import { PeakRssTracker } from './util/rss.js';
 // orchestrator process, permanently resident for the tool's whole lifetime.
 
 export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Promise<Manifest> {
-  const mode = opts.mode ?? 'accurate';
+  // Computed once, up front: resolveFrameMode is a pure function of
+  // frames/maxFrames, and both the catch-all failure manifest below and
+  // every stage inside analyzeResolved need the same value (spec §8).
+  const frameMode = resolveFrameMode(opts.frames, opts.maxFrames);
   const rss = new PeakRssTracker();
   rss.start();
   // Best-known source context for the catch-all failure manifest below --
@@ -39,7 +44,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   // reach the failure manifest.
   const warnings: string[] = [];
   try {
-    return await analyzeResolved(url, opts, mode, rss, src, warnings);
+    return await analyzeResolved(url, opts, frameMode, rss, src, warnings);
   } catch (e) {
     // The documented contract (src/mcp.ts): analyze_video RETURNS a manifest
     // rather than throwing. Anything the stage-level handling below did not
@@ -49,7 +54,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
       url, platform: src.platform, title: src.title, duration: src.duration,
       resolvedBy: src.resolvedBy, status: 'extractor_failed',
       reason: `analysis failed: ${e instanceof Error ? e.message : String(e)}`,
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode, warnings,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), frameMode, warnings,
     });
   } finally {
     // ALWAYS stop the sampler -- on the throw path above, but also as a
@@ -61,7 +66,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
 }
 
 async function analyzeResolved(
-  url: string, opts: AnalyzeOptions, mode: 'fast' | 'accurate', rss: PeakRssTracker,
+  url: string, opts: AnalyzeOptions, frameMode: FrameMode, rss: PeakRssTracker,
   src: { platform: string; title: string; resolvedBy: string; duration: number },
   warnings: string[],
 ): Promise<Manifest> {
@@ -79,16 +84,41 @@ async function analyzeResolved(
     return buildManifest({
       url, platform: 'unknown', title: '', duration: 0, resolvedBy: res.resolvedBy ?? 'none',
       status: res.status, reason: typeof res.reason === 'string' ? res.reason : res.message,
-      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode, warnings,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), frameMode, warnings,
     });
   }
   src.platform = res.platform; src.title = res.title;
   src.resolvedBy = res.resolvedBy; src.duration = res.duration;
 
-  // 2. Apply the range if the resolver could not (spec §18: optimization, not guarantee)
+  // 2. Apply the range if the resolver could not (spec §18: optimization, not
+  // guarantee). `clipRelative` tracks whether `media` (and later `video` /
+  // `meta.duration`) now covers exactly [start,end] rather than the whole
+  // source -- the 'even' dispatch in stage 5-7 needs to know this to sample
+  // in the right time base.
   let media = res.filePath;
+  let clipRelative = res.rangeApplied;
   if (opts.start !== undefined && opts.end !== undefined && !res.rangeApplied) {
-    media = await trim(media, opts.start, opts.end, join(workDir, 'clip.mp4'));
+    if (frameMode === 'even' && opts.start === opts.end) {
+      // Single-instant even-sampling request (spec §8's canonical example:
+      // start===end, maxFrames:1). ffmpeg's `-ss X -to X` trim fails
+      // outright -- verified directly against this project's trim(): exit
+      // code 234, stderr "-to value smaller than -ss; aborting", no output
+      // file produced at all -- so there is no clip to pre-trim here.
+      // `clipRelative` stays false (its `res.rangeApplied` initial value,
+      // false on this branch) and the dispatch below samples the untrimmed,
+      // normalized source directly at the absolute timestamp instead.
+      //
+      // Deliberately gated to 'even' specifically, not any start===end
+      // request: an unconditional skip would let 'key' mode silently run
+      // scene detection over the WHOLE video for a "single instant" request
+      // and return frames from outside the requested range, violating spec
+      // §2.2 ("Frame selection is bounded to the range, in both modes").
+      // 'key' + start===end keeps failing loudly via trim() below, exactly
+      // as it did before this task.
+    } else {
+      media = await trim(media, opts.start, opts.end, join(workDir, 'clip.mp4'));
+      clipRelative = true;
+    }
   }
 
   // 3. Normalize
@@ -104,7 +134,13 @@ async function analyzeResolved(
   // 4. Transcript -- STAGE 1 (ASR worker runs and exits before any vision work)
   let transcript: Transcript | null = null;
   if (opts.transcript !== false) {
-    const tier = chooseCaptionTier(res.captions, mode);
+    // Spec §2.2 ("Removed: mode and fps"): the caller-facing fast/accurate
+    // dial is gone and accuracy bias becomes UNCONDITIONAL -- human-authored
+    // captions win when present, otherwise local ASR runs; platform
+    // auto-captions are never substituted in. chooseCaptionTier's own
+    // 'fast' branch is untouched and still covered directly by
+    // tests/captions.test.ts; this call site just never reaches it anymore.
+    const tier = chooseCaptionTier(res.captions, 'accurate');
     if (tier !== 'asr') {
       const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
       if (existsSync(track.path)) {
@@ -141,125 +177,173 @@ async function analyzeResolved(
     }
   }
 
-  // 5. Candidates -> quality filter -> OCR -> text novelty. No resident model
-  // in this block (scene detection/candidates/quality/OCR are all subprocess
-  // or cheap-native), but two of its steps can genuinely throw:
-  //  - FFmpegSceneDetector.detect() on a hard ffmpeg failure (corrupt/empty
-  //    normalized video), and
-  //  - filterCandidates() when EVERY candidate in a non-empty batch fails to
-  //    SCORE (src/vision/quality.ts) -- added deliberately (Task 7) so a
-  //    systemic failure (broken sharp install, a corrupted extraction batch)
-  //    cannot silently look identical to "this video legitimately has no
-  //    interesting frames". Both failure modes mean the same thing from here:
-  //    "no usable candidates" -- so both are caught by one boundary around
-  //    the whole candidate-generation stage, surfaced as an honest non-'ok'
-  //    manifest rather than swallowed into an empty-but-'ok' frame list
-  //    (which would silently restore exactly the failure mode Task 7 added
-  //    the throw to prevent) or left to reject analyzeVideo's promise.
+  // 5-7. Frames -- frame-mode dispatch (spec §8). 'none' and 'even'
+  // deliberately skip scene detection, quality filtering, OCR and
+  // embeddings: a caller asking for one frame at a timestamp must not pay
+  // for the full pipeline. Those are exactly the stages with a resident (or
+  // subprocess-loaded) model or heavyweight native call; short-circuiting
+  // before them is the entire point of this task.
+  let frames: SelectedFrame[] = [];
   let candidateCount = 0;
-  let cands: Candidate[] = [];
-  try {
-    const boundaries = await new FFmpegSceneDetector().detect(video);
-    const plan = planCandidates(meta.duration, boundaries);
-    cands = await extractCandidates(video, plan, framesDir);
+
+  if (frameMode === 'even') {
+    const from = opts.start ?? 0;
+    const to = opts.end ?? meta.duration;
+    // `video` is already trimmed to [start,end] whenever clipRelative is
+    // true (either the resolver applied the range, or stage 2's trim() did),
+    // so sample in clip time. In the single-instant carve-out above,
+    // clipRelative is false and lo/hi fall back to the absolute timestamps,
+    // since there is no trimmed clip to be relative to.
+    const lo = (opts.start !== undefined && clipRelative) ? 0 : from;
+    const hi = (opts.end !== undefined && clipRelative) ? meta.duration : to;
+    // What sampleEven SHOULD produce for this window/budget, per its own
+    // (pure, exported) timestamp planner -- the honest baseline to compare
+    // actual output against. Comparing against raw `maxFrames` instead would
+    // spuriously warn on every single-instant request with maxFrames > 1,
+    // since evenTimestamps collapses a zero-length window to exactly one
+    // stamp BY DESIGN, not as a shortfall.
+    const requested = evenTimestamps(lo, hi, maxFrames).length;
+    const cands = await sampleEven(video, lo, hi, maxFrames, framesDir);
     candidateCount = cands.length;
-    cands = await filterCandidates(cands);
+    if (cands.length < requested) {
+      // sampleEven silently drops a timestamp it fails to extract (an
+      // unseekable point) rather than throwing -- record it here so a
+      // caller can tell "fewer frames than asked for, and here's why" apart
+      // from a healthy, fully-satisfied request (Manifest.processing.warnings'
+      // whole purpose: a degraded-but-'ok' run must leave a trace).
+      warnings.push(
+        `even sampling requested ${requested} frame(s) across [${lo}, ${hi}) but only `
+        + `extracted ${cands.length}; some timestamps were not seekable`,
+      );
+    }
+    frames = cands.map((c) => ({
+      timestamp: c.timestamp, sceneId: 0, image: c.imagePath,
+      importance: 0, reasons: ['even_sample'],
+      ocrContent: null, transcriptWindow: null, nearestSelectedSimilarity: 0,
+    }));
+  } else if (frameMode === 'key') {
+    // 5. Candidates -> quality filter -> OCR -> text novelty. No resident
+    // model in this block (scene detection/candidates/quality/OCR are all
+    // subprocess or cheap-native), but two of its steps can genuinely throw:
+    //  - FFmpegSceneDetector.detect() on a hard ffmpeg failure (corrupt/empty
+    //    normalized video), and
+    //  - filterCandidates() when EVERY candidate in a non-empty batch fails to
+    //    SCORE (src/vision/quality.ts) -- added deliberately (Task 7) so a
+    //    systemic failure (broken sharp install, a corrupted extraction batch)
+    //    cannot silently look identical to "this video legitimately has no
+    //    interesting frames". Both failure modes mean the same thing from here:
+    //    "no usable candidates" -- so both are caught by one boundary around
+    //    the whole candidate-generation stage, surfaced as an honest non-'ok'
+    //    manifest rather than swallowed into an empty-but-'ok' frame list
+    //    (which would silently restore exactly the failure mode Task 7 added
+    //    the throw to prevent) or left to reject analyzeVideo's promise.
+    let cands: Candidate[] = [];
+    try {
+      const boundaries = await new FFmpegSceneDetector().detect(video);
+      const plan = planCandidates(meta.duration, boundaries);
+      cands = await extractCandidates(video, plan, framesDir);
+      candidateCount = cands.length;
+      cands = await filterCandidates(cands);
 
-    const langs = engine === 'sensevoice' ? 'chi_sim+eng' : 'eng';
-    // Per-frame OCR failures degrade (empty text) but are RECORDED: a dead
-    // tesseract (missing binary, missing language pack) fails every frame
-    // and collapses to one summary warning; isolated per-frame failures are
-    // listed individually. ocrFrame/ocrBuffer now propagate real failures
-    // (nonzero tesseract exit, spawn error) instead of swallowing them into
-    // '' -- an empty string still means "no text seen", honestly.
-    const ocrFailures: string[] = [];
-    for (const c of cands) {
-      try {
-        const { content, subtitle } = await ocrFrame(c.imagePath, langs);
-        c.ocrContent = content; c.ocrSubtitle = subtitle;
-      } catch (e) {
-        c.ocrContent = ''; c.ocrSubtitle = '';
-        ocrFailures.push(`ocr failed for frame at ${c.timestamp.toFixed(2)}s: ${e instanceof Error ? e.message : String(e)}`);
+      const langs = engine === 'sensevoice' ? 'chi_sim+eng' : 'eng';
+      // Per-frame OCR failures degrade (empty text) but are RECORDED: a dead
+      // tesseract (missing binary, missing language pack) fails every frame
+      // and collapses to one summary warning; isolated per-frame failures are
+      // listed individually. ocrFrame/ocrBuffer now propagate real failures
+      // (nonzero tesseract exit, spawn error) instead of swallowing them into
+      // '' -- an empty string still means "no text seen", honestly.
+      const ocrFailures: string[] = [];
+      for (const c of cands) {
+        try {
+          const { content, subtitle } = await ocrFrame(c.imagePath, langs);
+          c.ocrContent = content; c.ocrSubtitle = subtitle;
+        } catch (e) {
+          c.ocrContent = ''; c.ocrSubtitle = '';
+          ocrFailures.push(`ocr failed for frame at ${c.timestamp.toFixed(2)}s: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
+      if (ocrFailures.length > 0 && ocrFailures.length === cands.length) {
+        warnings.push(`ocr unavailable: all ${cands.length} candidate frames failed (first: ${ocrFailures[0]})`);
+      } else {
+        warnings.push(...ocrFailures);
+      }
+      // One pass over the FULL surviving batch, not chunked: computeTextNovelty's
+      // persistence check looks one candidate ahead to decide whether a text
+      // change holds (genuine) or churns (subtitle/OCR noise), so only the
+      // batch's true final candidate should ever fall back to full weight.
+      // Splitting this call would manufacture an artificial "last candidate"
+      // at every chunk boundary, multiplying the one-frame edge case that
+      // computeTextNovelty's own doc comment already accepts at the real end.
+      cands = computeTextNovelty(cands);
+    } catch (e) {
+      return buildManifest({
+        url, platform: res.platform, title: res.title, duration: meta.duration,
+        resolvedBy: res.resolvedBy, status: 'extractor_failed',
+        reason: `candidate pipeline failed: ${e instanceof Error ? e.message : String(e)}`,
+        transcript, frames: [], candidateCount, peakRssMb: rss.stop(), frameMode, warnings,
+      });
     }
-    if (ocrFailures.length > 0 && ocrFailures.length === cands.length) {
-      warnings.push(`ocr unavailable: all ${cands.length} candidate frames failed (first: ${ocrFailures[0]})`);
-    } else {
-      warnings.push(...ocrFailures);
-    }
-    // One pass over the FULL surviving batch, not chunked: computeTextNovelty's
-    // persistence check looks one candidate ahead to decide whether a text
-    // change holds (genuine) or churns (subtitle/OCR noise), so only the
-    // batch's true final candidate should ever fall back to full weight.
-    // Splitting this call would manufacture an artificial "last candidate"
-    // at every chunk boundary, multiplying the one-frame edge case that
-    // computeTextNovelty's own doc comment already accepts at the real end.
-    cands = computeTextNovelty(cands);
-  } catch (e) {
-    return buildManifest({
-      url, platform: res.platform, title: res.title, duration: meta.duration,
-      resolvedBy: res.resolvedBy, status: 'extractor_failed',
-      reason: `candidate pipeline failed: ${e instanceof Error ? e.message : String(e)}`,
-      transcript, frames: [], candidateCount, peakRssMb: rss.stop(), mode, warnings,
+
+    // 6. Embeddings -- STAGE 2 (vision worker; ASR already exited)
+    let embedError: string | null = null;
+    const vectors = await embedImages(cands.map((c) => c.imagePath)).catch((e: unknown) => {
+      embedError = e instanceof Error ? e.message : String(e);
+      return [] as number[][];
     });
-  }
 
-  // 6. Embeddings -- STAGE 2 (vision worker; ASR already exited)
-  let embedError: string | null = null;
-  const vectors = await embedImages(cands.map((c) => c.imagePath)).catch((e: unknown) => {
-    embedError = e instanceof Error ? e.message : String(e);
-    return [] as number[][];
-  });
+    // Guarded assignment: embedImages returns `[]` (never a dropped array
+    // entry) in a candidate's slot when that one image failed to embed, to
+    // preserve index alignment with `cands` (src/vision/embed.ts). Only ever
+    // assign a REAL vector; a candidate whose embed failed keeps `embedding`
+    // unset. This alone is necessary but NOT sufficient: an empty array and
+    // `undefined` are provably indistinguishable to src/vision/select.ts's
+    // selectFrames today (cosine([], x) truncates to length 0 and returns
+    // exactly 0, the same value maxSim already defaults to when `c.embedding`
+    // is falsy -- verified directly against the compiled selector, see
+    // task-14-report.md), so leaving the array unassigned changes nothing about
+    // that candidate's own selection score by itself.
+    let anyEmbedded = false;
+    cands.forEach((c, i) => {
+      const v = vectors[i];
+      if (v && v.length) { c.embedding = v; anyEmbedded = true; }
+    });
+    if (anyEmbedded) {
+      // The actual fix: drop a candidate whose embedding failed, but ONLY when
+      // at least one other candidate in this batch embedded successfully.
+      // Rationale: selectFrames treats "no embedding" as maxSim=0, i.e.
+      // unpenalized for similarity to whatever is already picked -- the most
+      // favorable score the diversity term can produce. A real embedded
+      // candidate almost never scores that well (two genuinely different
+      // images still cosine-similarity high in practice -- Task 12 measured
+      // 0.82 between two flat, unrelated colours), so an embedding-less
+      // candidate would systematically outrank ones we can actually vouch for.
+      // Dropping it is safe here specifically because these images already
+      // passed filterCandidates' own sharp-decode gate upstream, so a
+      // SigLIP-only failure on one of them is a genuine anomaly, not the
+      // common case. When NONE embedded (worker crashed, model unavailable,
+      // no network) every candidate is treated identically -- keep them all,
+      // since a uniform maxSim=0 is an unbiased degrade, not a bias toward any
+      // particular frame, and dropping the whole pool would silently turn a
+      // healthy video into an empty result.
+      cands = cands.filter((c) => c.embedding !== undefined);
+    }
+    if (embedError !== null) {
+      warnings.push(`embedding failed: ${embedError}`);
+    } else if (!anyEmbedded && cands.length > 0) {
+      warnings.push('embedding produced no vectors; similarity dedupe is disabled for this run');
+    }
 
-  // Guarded assignment: embedImages returns `[]` (never a dropped array
-  // entry) in a candidate's slot when that one image failed to embed, to
-  // preserve index alignment with `cands` (src/vision/embed.ts). Only ever
-  // assign a REAL vector; a candidate whose embed failed keeps `embedding`
-  // unset. This alone is necessary but NOT sufficient: an empty array and
-  // `undefined` are provably indistinguishable to src/vision/select.ts's
-  // selectFrames today (cosine([], x) truncates to length 0 and returns
-  // exactly 0, the same value maxSim already defaults to when `c.embedding`
-  // is falsy -- verified directly against the compiled selector, see
-  // task-14-report.md), so leaving the array unassigned changes nothing about
-  // that candidate's own selection score by itself.
-  let anyEmbedded = false;
-  cands.forEach((c, i) => {
-    const v = vectors[i];
-    if (v && v.length) { c.embedding = v; anyEmbedded = true; }
-  });
-  if (anyEmbedded) {
-    // The actual fix: drop a candidate whose embedding failed, but ONLY when
-    // at least one other candidate in this batch embedded successfully.
-    // Rationale: selectFrames treats "no embedding" as maxSim=0, i.e.
-    // unpenalized for similarity to whatever is already picked -- the most
-    // favorable score the diversity term can produce. A real embedded
-    // candidate almost never scores that well (two genuinely different
-    // images still cosine-similarity high in practice -- Task 12 measured
-    // 0.82 between two flat, unrelated colours), so an embedding-less
-    // candidate would systematically outrank ones we can actually vouch for.
-    // Dropping it is safe here specifically because these images already
-    // passed filterCandidates' own sharp-decode gate upstream, so a
-    // SigLIP-only failure on one of them is a genuine anomaly, not the
-    // common case. When NONE embedded (worker crashed, model unavailable,
-    // no network) every candidate is treated identically -- keep them all,
-    // since a uniform maxSim=0 is an unbiased degrade, not a bias toward any
-    // particular frame, and dropping the whole pool would silently turn a
-    // healthy video into an empty result.
-    cands = cands.filter((c) => c.embedding !== undefined);
+    // 7. Select
+    frames = selectFrames(cands, maxFrames, meta.duration);
   }
-  if (embedError !== null) {
-    warnings.push(`embedding failed: ${embedError}`);
-  } else if (!anyEmbedded && cands.length > 0) {
-    warnings.push('embedding produced no vectors; similarity dedupe is disabled for this run');
-  }
+  // frameMode === 'none': frames stays [], candidateCount stays 0 -- no
+  // scene detection, no quality filter, no OCR, no embeddings run at all.
 
-  // 7. Select + align
-  let frames = selectFrames(cands, maxFrames, meta.duration);
-  if (transcript) frames = attachTranscript(frames, transcript.segments);
+  if (transcript && frames.length > 0) frames = attachTranscript(frames, transcript.segments);
 
   return buildManifest({
     url, platform: res.platform, title: res.title, duration: meta.duration,
     resolvedBy: res.resolvedBy, status: 'ok', filePath: video,
-    transcript, frames, candidateCount, peakRssMb: rss.stop(), mode, warnings,
+    transcript, frames, candidateCount, peakRssMb: rss.stop(), frameMode, warnings,
   });
 }

@@ -1,11 +1,11 @@
-import type { Manifest, SelectedFrame, Transcript, AnalyzeMode, ResolveStatus } from './types.js';
+import type { Manifest, SelectedFrame, Transcript, FrameMode, ResolveStatus } from './types.js';
 import { SELECTOR_VERSION } from './vision/select.js';
 
 export function buildManifest(p: {
   url: string; platform: string; title: string; duration: number; resolvedBy: string;
   status: ResolveStatus; reason?: string; filePath?: string;
   transcript: Transcript | null; frames: SelectedFrame[];
-  candidateCount: number; peakRssMb: number; mode: AnalyzeMode;
+  candidateCount: number; peakRssMb: number; frameMode: FrameMode;
   warnings?: string[];
 }): Manifest {
   return {
@@ -21,7 +21,7 @@ export function buildManifest(p: {
       candidateFrames: p.candidateCount,
       peakRssMb: p.peakRssMb,
       selectorVersion: SELECTOR_VERSION,
-      mode: p.mode,
+      frameMode: p.frameMode,
       warnings: p.warnings ?? [],
     },
   };
