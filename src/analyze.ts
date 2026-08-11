@@ -28,10 +28,39 @@ import { PeakRssTracker } from './util/rss.js';
 
 export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Promise<Manifest> {
   const mode = opts.mode ?? 'accurate';
-  const maxFrames = opts.maxFrames ?? 35;
   const rss = new PeakRssTracker();
   rss.start();
+  // Best-known source context for the catch-all failure manifest below --
+  // updated as stages succeed, so a mid-pipeline throw still reports which
+  // platform/title it got as far as resolving.
+  const src = { platform: 'unknown', title: '', resolvedBy: 'none', duration: 0 };
+  try {
+    return await analyzeResolved(url, opts, mode, rss, src);
+  } catch (e) {
+    // The documented contract (src/mcp.ts): analyze_video RETURNS a manifest
+    // rather than throwing. Anything the stage-level handling below did not
+    // absorb (normalize/probe/trim, filesystem errors, ...) becomes an
+    // honest failure manifest here instead of a rejection.
+    return buildManifest({
+      url, platform: src.platform, title: src.title, duration: src.duration,
+      resolvedBy: src.resolvedBy, status: 'extractor_failed',
+      reason: `analysis failed: ${e instanceof Error ? e.message : String(e)}`,
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode,
+    });
+  } finally {
+    // ALWAYS stop the sampler -- on the throw path above, but also as a
+    // backstop for any return path: in the long-lived MCP server a missed
+    // stop() leaks a 250ms `ps -A` interval permanently, once per call.
+    // stop() is idempotent (the timer is cleared and nulled).
+    rss.stop();
+  }
+}
 
+async function analyzeResolved(
+  url: string, opts: AnalyzeOptions, mode: 'fast' | 'accurate', rss: PeakRssTracker,
+  src: { platform: string; title: string; resolvedBy: string; duration: number },
+): Promise<Manifest> {
+  const maxFrames = opts.maxFrames ?? 35;
   const workDir = opts.outDir ?? mkdtempSync(join(tmpdir(), 'norma-'));
   mkdirSync(workDir, { recursive: true });
   const framesDir = join(workDir, 'frames');
@@ -48,6 +77,8 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
       transcript: null, frames: [], candidateCount: 0, peakRssMb: rss.stop(), mode,
     });
   }
+  src.platform = res.platform; src.title = res.title;
+  src.resolvedBy = res.resolvedBy; src.duration = res.duration;
 
   // 2. Apply the range if the resolver could not (spec §18: optimization, not guarantee)
   let media = res.filePath;
@@ -58,6 +89,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   // 3. Normalize
   const { video, audio } = await normalize(media, workDir);
   const meta = await probe(video);
+  src.duration = meta.duration;
 
   // ASR routing depends only on preferredLanguage/languageHint, so the same
   // engine choice governs both the transcript stage and OCR's language pack

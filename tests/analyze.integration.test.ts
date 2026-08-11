@@ -43,6 +43,10 @@ vi.mock('../dist/resolve/index.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../dist/resolve/index.js')>();
   return { ...real, resolve: vi.fn(real.resolve) };
 });
+vi.mock('../dist/media/ffmpeg.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../dist/media/ffmpeg.js')>();
+  return { ...real, normalize: vi.fn(real.normalize) };
+});
 
 // Imported AFTER the vi.mock calls above (textually and, more importantly,
 // semantically -- vitest hoists vi.mock factories ahead of all imports in
@@ -54,6 +58,7 @@ const { buildManifest } = await import('../dist/manifest.js');
 const { embedImages } = await import('../dist/vision/embed.js');
 const { filterCandidates } = await import('../dist/vision/quality.js');
 const { resolve } = await import('../dist/resolve/index.js');
+const { normalize } = await import('../dist/media/ffmpeg.js');
 
 /** A deterministic, distinct, already-unit-norm 768-dim vector per index. */
 function unitVec(i: number): number[] {
@@ -229,6 +234,32 @@ describe('analyzeVideo -- range + captions alignment (B3)', () => {
       expect(f.transcriptWindow ?? '').not.toContain('BEFORE_RANGE_MARKER');
     }
   }, 120_000);
+});
+
+describe('analyzeVideo -- documented no-throw contract (media-stage throws become failure manifests)', () => {
+  it('returns an honest failure manifest (and a real peakRssMb) when normalize() throws, instead of rejecting', async () => {
+    // src/mcp.ts documents analyze_video as "returns a manifest rather than
+    // throwing". Pre-fix, a throw from normalize/probe/trim rejected
+    // analyzeVideo AND skipped rss.stop(), leaking the 250ms ps -A sampler
+    // permanently in a long-lived MCP server -- once per failed call.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-nothrow-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 6);
+    vi.mocked(normalize).mockImplementationOnce(async () => {
+      throw new Error('SIMULATED: normalize exploded');
+    });
+
+    // No try/catch on purpose: a rejection here IS the pre-fix failure mode.
+    const m = await analyzeVideo(v, { maxFrames: 2, transcript: false, outDir: join(dir, 'out') });
+    expect(normalize).toHaveBeenCalled();
+    expect(m.source.status).toBe('extractor_failed');
+    expect(m.source.reason).toContain('SIMULATED: normalize exploded');
+    expect(m.frames).toEqual([]);
+    // Partial context survives: the resolver DID succeed before the throw.
+    expect(m.source.platform).toBe('local');
+    expect(m.source.resolvedBy).toBe('direct');
+    // rss.stop() ran (the tracker was started, so the peak is a real number).
+    expect(m.processing.peakRssMb).toBeGreaterThan(0);
+  }, 60_000);
 });
 
 describe('analyzeVideo -- issue 1: a failed embedding must not be preferentially selected', () => {
