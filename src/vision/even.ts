@@ -13,6 +13,7 @@ import { extractFrame } from '../media/ffmpeg.js';
  */
 export function evenTimestamps(start: number, end: number, count: number): number[] {
   if (count <= 0) return [];
+  // Single instant (end === start) and reversed ranges (end < start) both return a single sample at start.
   if (end <= start) return [Math.max(0, start)];
   const step = (end - start) / count;
   const out: number[] = [];

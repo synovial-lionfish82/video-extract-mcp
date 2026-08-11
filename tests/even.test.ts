@@ -32,4 +32,10 @@ describe('evenTimestamps', () => {
   it('never returns a negative timestamp', () => {
     expect(evenTimestamps(0, 1, 3).every((t) => t >= 0)).toBe(true);
   });
+  it('clamps single-instant with zero budget to empty array (convention: zero budget means no frames)', () => {
+    expect(evenTimestamps(7, 7, 0)).toEqual([]);
+  });
+  it('clamps negative timestamps to zero when window starts below zero', () => {
+    expect(evenTimestamps(-5, 5, 4).every((t) => t >= 0)).toBe(true);
+  });
 });
