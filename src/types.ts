@@ -68,6 +68,15 @@ export interface Manifest {
   source: {
     url: string; platform: string; title: string; duration: number;
     resolvedBy: string; status: ResolveStatus; reason?: string;
+    /**
+     * Local filesystem path to the normalized working video analyzeVideo
+     * produced (NOT the original download) -- present only on the 'ok'
+     * path. This is what closes the coarse-to-fine loop: get_frame/get_clip
+     * operate on a local file, and until this field existed, analyzeVideo's
+     * own manifest had no such path for them to operate on (only individual
+     * per-keyframe image paths). See task-16-report.md Finding 2.
+     */
+    filePath?: string;
   };
   transcript: Transcript | null;
   frames: SelectedFrame[];

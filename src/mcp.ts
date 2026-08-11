@@ -27,13 +27,16 @@ export function buildServer(): McpServer {
     { name: 'norma-video', version: '0.1.0' },
     {
       instructions:
-        'Video extraction for AI agents. Typical flow: call resolve_video first for a '
-        + 'cheap upfront check (also returns a local filePath you can reuse). Call '
-        + 'analyze_video for the real payload -- a transcript plus important, deduplicated '
-        + 'keyframes. If the overview turns up something worth a closer look at a specific '
-        + 'moment, call get_frame or get_clip against a local video file path (from '
-        + "resolve_video's filePath -- analyze_video's manifest does not itself carry one) "
-        + 'to inspect that moment densely instead of reprocessing the whole video.',
+        'Video extraction for AI agents. Typical flow: call analyze_video directly -- it '
+        + 'returns a transcript plus important, deduplicated keyframes, AND (on success) '
+        + "source.filePath, a local path to the downloaded video on this machine. If the "
+        + 'overview turns up something worth a closer look at a specific moment, call '
+        + 'get_frame or get_clip against that filePath to inspect the moment densely instead '
+        + 'of reprocessing the whole video. Call resolve_video only when you need a fast '
+        + 'upfront check of whether a URL can be extracted at all before committing to '
+        + "analyze_video's slower full pipeline -- resolve_video still downloads the full "
+        + 'media itself (it only skips transcription/embedding/OCR), so calling it before '
+        + 'analyze_video on the same URL means downloading that video twice.',
     },
   );
 
@@ -51,11 +54,14 @@ export function buildServer(): McpServer {
         + 'DRM-protected, unsupported site, not found, ...) this returns a manifest whose '
         + "source.status is not 'ok' with a human-readable reason, rather than throwing -- "
         + 'always check source.status before trusting the rest of the manifest. Each returned '
-        + "frame's image field is a local file path on this machine, not a URL. This manifest "
-        + 'does NOT include a reusable local path to the full source video -- call '
-        + 'resolve_video first and keep its filePath if you will need get_frame/get_clip '
-        + 'afterwards. Consider calling resolve_video first if you only need a cheap upfront '
-        + 'check of whether a URL can be extracted at all.',
+        + "frame's image field is a local file path on this machine, not a URL. On success, "
+        + 'source.filePath is ALSO a local path on this machine, pointing at the full '
+        + '(downloaded and normalized) working video -- pass it to get_frame/get_clip for a '
+        + 'closer look at a specific moment; source.filePath is absent on failure. Call '
+        + 'resolve_video first only if you need a fast upfront check of whether a URL can be '
+        + "extracted at all before committing to this tool's slower full pipeline -- note "
+        + 'that resolve_video still downloads the full media itself, so calling it before '
+        + 'this tool on the same URL means downloading that video twice.',
       inputSchema: {
         url: z.string().describe('Page or direct video URL to extract (e.g. a YouTube/TikTok/WeChat Channels link, or a direct .mp4/.m3u8 URL).'),
         start: z.number().optional().describe('Start second of the range to analyze -- provide together with end (start alone, or end alone, has no effect). Omit both to analyze the whole video.'),
@@ -75,18 +81,22 @@ export function buildServer(): McpServer {
   server.registerTool(
     'resolve_video',
     {
-      title: 'Resolve video (cheap check)',
+      title: 'Resolve video (check without analyzing)',
       description:
-        'Cheap upfront check: resolves a URL to determine whether it can be extracted at all, '
-        + 'without transcribing audio or scanning for keyframes -- much faster than '
-        + 'analyze_video. On success, returns platform, title, duration, which captions '
-        + '(manual/auto) are already available, and a local filePath to the downloaded source '
-        + 'video on this machine. On failure, returns a specific status (e.g. '
-        + "'auth_required', 'unsupported', 'not_found', 'needs_interaction') and a "
-        + 'human-readable reason instead of throwing. Use this to fail fast on a bad link, to '
-        + "decide whether analyze_video's slower full pipeline is worth running, or to obtain "
-        + 'a local video file path to pass into get_frame/get_clip for direct frame-level '
-        + 'inspection.',
+        'Resolves a URL to determine whether it can be extracted at all, WITHOUT '
+        + 'transcribing audio, computing embeddings, or scanning for keyframes -- much faster '
+        + 'than analyze_video since it skips those stages. It is NOT cheap or free, though: '
+        + 'on success it still performs a full download of the video (and, depending on the '
+        + 'source, its audio and subtitle tracks) -- the same download analyze_video itself '
+        + 'would perform. Calling this and then analyze_video on the SAME URL downloads that '
+        + 'video twice; prefer calling analyze_video directly when you already expect to want '
+        + 'its output. Returns platform, title, duration, which captions (manual/auto) are '
+        + 'already available, and a local filePath to the downloaded source video on this '
+        + 'machine. On failure, returns a specific status (e.g. \'auth_required\', '
+        + "'unsupported', 'not_found', 'needs_interaction') and a human-readable reason "
+        + 'instead of throwing. Use this on its own when you only need to check '
+        + 'extractability, or need a local video file path without paying for '
+        + 'transcription/embedding/OCR.',
       inputSchema: {
         url: z.string().describe('Page or direct video URL to check.'),
       },
@@ -104,14 +114,14 @@ export function buildServer(): McpServer {
       title: 'Get one frame',
       description:
         'Extracts a single frame at an exact timestamp from a video file ALREADY DOWNLOADED '
-        + 'TO THIS MACHINE. source must be a local filesystem path (e.g. the filePath '
-        + "returned by resolve_video) -- NOT a URL; passing a URL will fail. This is the fine "
-        + 'half of the coarse-to-fine workflow: once an overview (from analyze_video) or a '
-        + 'resolved source (from resolve_video) points at a moment worth a closer look, call '
+        + 'TO THIS MACHINE. source must be a local filesystem path (e.g. the source.filePath '
+        + "returned by a successful analyze_video call, or resolve_video's filePath) -- NOT a "
+        + 'URL; passing a URL will fail. This is the fine half of the coarse-to-fine workflow: '
+        + "once analyze_video's overview points at a moment worth a closer look, call "
         + 'get_frame with that exact timestamp in seconds. Returns the local file path of the '
         + 'extracted JPEG.',
       inputSchema: {
-        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. resolve_video\'s filePath). NOT a URL.'),
+        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. a successful analyze_video call\'s source.filePath, or resolve_video\'s filePath). NOT a URL.'),
         timestamp: z.number().describe('Timestamp in seconds to extract.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -129,15 +139,16 @@ export function buildServer(): McpServer {
       description:
         'Densely samples frames across a narrow time window from a video file ALREADY '
         + 'DOWNLOADED TO THIS MACHINE. source must be a local filesystem path (e.g. the '
-        + "filePath returned by resolve_video) -- NOT a URL; passing a URL will fail. Use "
-        + "this for the coarse-to-fine second pass: after analyze_video's overview flags "
-        + 'something interesting around a timestamp (say, something at 8:31 = 511s), call '
-        + 'get_clip with a narrow window around it (e.g. start=505, end=515) to sample it '
-        + 'densely -- at fps frames per second, default 2 -- instead of reprocessing the '
-        + 'entire video. Returns the local file paths of the extracted JPEGs, in '
-        + 'chronological order.',
+        + "source.filePath returned by a successful analyze_video call, or resolve_video's "
+        + 'filePath) -- NOT a URL; passing a URL will fail. Use this for the coarse-to-fine '
+        + "second pass: after analyze_video's overview flags something interesting around a "
+        + 'timestamp (say, something at 8:31 = 511s), call get_clip with source set to that '
+        + 'same analyze_video call\'s source.filePath and a narrow window around the '
+        + 'timestamp (e.g. start=505, end=515) to sample it densely -- at fps frames per '
+        + 'second, default 2 -- instead of reprocessing the entire video. Returns the local '
+        + 'file paths of the extracted JPEGs, in chronological order.',
       inputSchema: {
-        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. resolve_video\'s filePath). NOT a URL.'),
+        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. a successful analyze_video call\'s source.filePath, or resolve_video\'s filePath). NOT a URL.'),
         start: z.number().describe('Start second of the window to sample.'),
         end: z.number().describe('End second of the window to sample.'),
         fps: z.number().optional().default(2).describe('Sampling rate in frames per second. Default 2 -- higher values give denser sampling at the cost of more frames.'),

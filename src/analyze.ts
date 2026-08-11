@@ -175,7 +175,7 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
 
   return buildManifest({
     url, platform: res.platform, title: res.title, duration: meta.duration,
-    resolvedBy: res.resolvedBy, status: 'ok',
+    resolvedBy: res.resolvedBy, status: 'ok', filePath: video,
     transcript, frames, candidateCount, peakRssMb: rss.stop(), mode,
   });
 }

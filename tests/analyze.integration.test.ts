@@ -1,9 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { makeTestVideo } from '../src/media/ffmpeg.js';
 import { SELECTOR_VERSION } from '../src/vision/select.js';
+// getClip has no import.meta.url-relative worker to spawn (plain ffmpeg
+// subprocess calls via run()), so -- unlike analyzeVideo below -- there is
+// no source-vs-dist trap for it; tests/primitives.test.ts already imports it
+// straight from src/ for the same reason.
+import { getClip } from '../src/primitives.js';
 
 // analyzeVideo (and its whole transitive import graph) is loaded from the
 // COMPILED dist/ output, NOT the TS source -- requires `npm run build` first
@@ -74,6 +79,15 @@ describe('analyzeVideo (local file, end to end)', () => {
     expect(existsSync(m.frames[0]!.image)).toBe(true);
     // Every selected frame's image must be a real file, not just the first.
     for (const f of m.frames) expect(existsSync(f.image)).toBe(true);
+    // source.filePath closes the coarse-to-fine handoff (task-16-report.md
+    // Finding 2): a real, existing local path to the NORMALIZED working
+    // video (basename fixed by normalize() in src/media/ffmpeg.ts) -- not
+    // the original download, and not one of the per-frame keyframe JPEGs
+    // above, which is what get_frame/get_clip need to operate on afterwards.
+    expect(typeof m.source.filePath).toBe('string');
+    expect(existsSync(m.source.filePath!)).toBe(true);
+    expect(statSync(m.source.filePath!).size).toBeGreaterThan(0);
+    expect(basename(m.source.filePath!)).toBe('work.mp4');
     // Printed, not just asserted on: the brief asks to "inspect the printed
     // peakRssMb", and a report claiming embeddings ran needs more than
     // "frames exist" -- two grid-textured frames sampled seconds apart
@@ -95,7 +109,34 @@ describe('analyzeVideo (local file, end to end)', () => {
     expect(m.frames).toEqual([]);
     expect(m.transcript).toBeNull();
     expect(m.processing.peakRssMb).toBeGreaterThan(0);
+    // A failure manifest must NOT claim a filePath -- there is no normalized
+    // working video on a path that never resolved, and a present-but-wrong
+    // filePath would be worse than omitting it (an agent could feed it
+    // straight to get_frame/get_clip and get a confusing failure instead of
+    // checking source.status first, which is already the documented
+    // contract in src/mcp.ts's analyze_video description).
+    expect(m.source.filePath).toBeUndefined();
+    expect('filePath' in m.source).toBe(false);
   }, 300_000);
+
+  it("closes the coarse-to-fine loop: a successful manifest's filePath can be fed straight into getClip and returns real frames", async () => {
+    // This is the test the whole fix is FOR (task-16-report.md Finding 2):
+    // an agent that ran analyze_video, spotted something at a timestamp, and
+    // wants a closer look must be able to take source.filePath verbatim and
+    // hand it to get_clip -- not just observe that some string was returned.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-loop-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const m = await analyzeVideo(v, { maxFrames: 2, transcript: false, outDir: join(dir, 'out') });
+    expect(m.source.status).toBe('ok');
+    expect(typeof m.source.filePath).toBe('string');
+    const frames = await getClip(m.source.filePath!, 2, 5, 1, join(dir, 'clip-out'));
+    // Exact count (3), matching the same fps=1-over-[2,5)-on-a-9s-fixture
+    // baseline already established in tests/primitives.test.ts and
+    // tests/mcp.test.ts -- not just "at least one frame", which would pass
+    // even for a getClip call against a wrong or empty file in some cases.
+    expect(frames).toHaveLength(3);
+    expect(frames.every((f) => existsSync(f) && statSync(f).size > 0)).toBe(true);
+  }, 120_000);
 
   it('respects the maxFrames budget when more candidates survive than the budget allows', async () => {
     // Mocked embed (fast, deterministic) -- this test is about the budget
@@ -244,5 +285,28 @@ describe('buildManifest', () => {
       reason: 'nope', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'accurate',
     });
     expect(m.source.reason).toBe('nope');
+  });
+
+  it('omits `filePath` entirely (not just undefined) when none is given', () => {
+    // Mirrors the `reason`-omission test above exactly, for the field this
+    // task's Finding 2 added: buildManifest is the single choke point that
+    // threads filePath from analyze.ts into the Manifest, so this pins the
+    // "not present at all" contract analyze_video's failure-path callers
+    // rely on (a present-but-undefined key would still pass a naive
+    // `?? fallback` check but is a different, weaker guarantee than the key
+    // being genuinely absent, which `'filePath' in m.source` verifies).
+    const m = buildManifest({
+      url: 'u', platform: 'p', title: 't', duration: 0, resolvedBy: 'direct', status: 'ok',
+      transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'fast',
+    });
+    expect('filePath' in m.source).toBe(false);
+  });
+
+  it('includes `filePath` when one is given', () => {
+    const m = buildManifest({
+      url: 'u', platform: 'direct', title: 't', duration: 9, resolvedBy: 'direct', status: 'ok',
+      filePath: '/work/dir/work.mp4', transcript: null, frames: [], candidateCount: 0, peakRssMb: 1, mode: 'accurate',
+    });
+    expect(m.source.filePath).toBe('/work/dir/work.mp4');
   });
 });
