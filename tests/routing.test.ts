@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { chooseAsrEngine } from '../src/transcript/routing.js';
+import { chooseAsrEngine, pickSenseVoiceLanguage } from '../src/transcript/routing.js';
 
 describe('chooseAsrEngine (spec §9)', () => {
   it.each(['zh', 'yue', 'ja', 'ko'])('routes %s to SenseVoice', (lang) => {
@@ -21,5 +21,38 @@ describe('chooseAsrEngine (spec §9)', () => {
   });
   it('falls back to platform metadata when no preference is given', () => {
     expect(chooseAsrEngine({ languageHint: 'ja' })).toBe('sensevoice');
+  });
+});
+
+// pickSenseVoiceLanguage is unit-tested with synthetic raw `.lang` values
+// because the real model cannot currently produce a non-artifact value (see
+// its doc comment in routing.ts and task-11-report.md's addendum for the
+// empirical sweep proving sherpa-onnx-node@1.13.4's SenseVoice `.lang` is
+// constant regardless of input).
+describe('pickSenseVoiceLanguage', () => {
+  it('majority-votes across segments that carry real (non-artifact) signal', () => {
+    expect(pickSenseVoiceLanguage(['<|ja|>', '<|ja|>', '<|zh|>'])).toBe('ja');
+  });
+  it('excludes the known-constant "yue" artifact from the vote entirely', () => {
+    // If "yue" were not excluded, plurality would wrongly pick it (2 vs 1).
+    expect(pickSenseVoiceLanguage(['<|yue|>', '<|yue|>', '<|ja|>'])).toBe('ja');
+  });
+  it('falls back to "auto" when every segment is the artifact and no preferredLanguage was given', () => {
+    expect(pickSenseVoiceLanguage(['<|yue|>', '<|yue|>'])).toBe('auto');
+  });
+  it('falls back to the normalized preferredLanguage when every segment is the artifact', () => {
+    expect(pickSenseVoiceLanguage(['<|yue|>'], 'ko')).toBe('ko');
+  });
+  it('falls back to "auto" on an empty segment list with no preferredLanguage', () => {
+    expect(pickSenseVoiceLanguage([])).toBe('auto');
+  });
+  it('normalizes a locale-tagged preferredLanguage fallback the same way chooseAsrEngine does', () => {
+    expect(pickSenseVoiceLanguage([], 'ZH_hant')).toBe('zh');
+  });
+  it('normalizes bare (unwrapped) and case/locale-varied lang codes, not just "<|xx|>" tokens', () => {
+    expect(pickSenseVoiceLanguage(['ja', 'JA', 'ja-JP'])).toBe('ja');
+  });
+  it('ignores null/undefined/empty entries without crashing or counting them', () => {
+    expect(pickSenseVoiceLanguage([null, undefined, '', '<|ko|>', '<|ko|>'])).toBe('ko');
   });
 });
