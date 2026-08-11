@@ -54,7 +54,9 @@ The full description, formats, view counts, and everything else go to the metada
 
 **When `returnVideo` is false, the result explicitly states the two ways forward:** call `resolve_video` again with `returnVideo: true` to fetch the media, or call `analyze_video` with the same URL to go straight to analysis. Without that, an agent holding only metadata has to infer its next move.
 
-**`comments` defaults to false** and its cost is stated in the description. yt-dlp's own help warns comments are fetched even when that is not quick; on a popular video this can mean thousands of comments and a long wait. A parameter that can turn a two-second call into a two-minute one must say so, or it will be enabled by reflex.
+**`comments` defaults to false** and its cost is stated in the description. yt-dlp's own help warns comments are fetched even when that is not quick; on a popular video this can mean thousands of comments and a long wait. A parameter that can turn a two-second call into a two-minute one must say so, or it will be enabled by reflex. Comments go to the metadata file only — never inline, whatever the count — with the count surfaced in the result so an agent knows they are there and can read the file if it wants them.
+
+**When `analyze_video` is given a local path**, no copy is made — `destinationPath` receives the manifest, transcript and frames, and the result points at the existing file rather than duplicating it. Copying would double disk use for clips that are already exactly where the agent put them.
 
 ### 2.2 `analyze_video`
 
@@ -78,6 +80,10 @@ analyze_video(
 **`frames` replaces the v1 boolean idea.** `"key"` runs the importance selector and returns the best frames, deduplicated, capped by `maxFrames`. `"even"` samples uniformly across the range — the dense-inspection case. `"none"` returns no frames, which is how an agent asks for a transcript alone. An enum reads correctly cold; a `keyFramesOnly: false` boolean does not obviously mean "sample evenly."
 
 **`maxFrames` carries what `fps` used to.** In `"even"` mode, budget across the range determines density: 60–90s with `maxFrames: 60` is 2fps. A single precise frame is `start: 7, end: 7, frames: "even", maxFrames: 1`.
+
+**Frame selection is bounded to the range, in both modes.** `"key"` selects the best frames *within* `start`–`end`, never outside it, and `maxFrames` is a hard cap on what comes back. This has a consequence the implementer must not miss: the selector's temporal-coverage term — the part that stops it clustering every pick in one interesting minute — must spread picks across **the requested range**, not across the full video. Computing coverage against the original duration when a range is set would systematically distort selection, weighting a 30-second window as though it were a sliver of the whole.
+
+**`maxFrames: 0` is accepted as an alias for `frames: "none"`.** The enum is the documented way to ask for a transcript alone, but a zero budget means the same thing and should not error. The description mentions both, since an agent reasoning about budgets may reach for the number before the enum.
 
 **Removed: `mode` and `fps`.** `fps` is redundant per above. `mode` only ever decided whether platform auto-captions were trusted in place of running speech recognition — far narrower than "fast versus accurate" implies, and a reviewer already flagged the description as overselling it. Accuracy bias becomes unconditional: human-authored captions are used when present, otherwise local speech recognition runs.
 
@@ -132,6 +138,10 @@ The `resolve_video` description names what is genuinely exercised — YouTube, T
 ## 7. Idempotent writes
 
 The same URL written to the same `destinationPath` twice **overwrites cleanly and returns the same shape**, whether it is the first call or the third. Throwing is hostile; keeping both copies leaves the agent guessing which is current. This covers the common metadata-then-video sequence, which is the same call made twice with `returnVideo` flipped.
+
+**Ranges make "the same video" ambiguous, so treat the range as part of the identity.** Fetching 12:04–20:00 and then fetching the full video into the same directory are not the same artifact, and silently overwriting one with the other would leave an agent holding a file whose length contradicts what it just read. Media files are therefore named to reflect the applied range, so a full fetch and a clipped fetch coexist without collision, while re-fetching *the same range* overwrites in place. Metadata, which describes the source video rather than any particular clip, is single and always replaced.
+
+The rule an agent can rely on: repeating a call is always safe and always yields the same result; varying the range adds an artifact rather than destroying one.
 
 ## 8. The implementation risk worth naming
 
