@@ -81,7 +81,9 @@ analyze_video(
 
 **`maxFrames` carries what `fps` used to.** In `"even"` mode, budget across the range determines density: 60–90s with `maxFrames: 60` is 2fps. A single precise frame is `start: 7, end: 7, frames: "even", maxFrames: 1`.
 
-**Frame selection is bounded to the range, in both modes.** `"key"` selects the best frames *within* `start`–`end`, never outside it, and `maxFrames` is a hard cap on what comes back. This has a consequence the implementer must not miss: the selector's temporal-coverage term — the part that stops it clustering every pick in one interesting minute — must spread picks across **the requested range**, not across the full video. Computing coverage against the original duration when a range is set would systematically distort selection, weighting a 30-second window as though it were a sliver of the whole.
+**Frame selection is bounded to the range, in both modes.** `"key"` selects the best frames *within* `start`–`end`, never outside it, and `maxFrames` is a hard cap on what comes back.
+
+> **Verified already true — do not "fix" this.** An earlier draft of this spec claimed the selector's temporal-coverage term would wrongly span the original video when a range was set. That was checked against the code and is false. The media is trimmed (or fetched pre-trimmed) *before* normalization, so `probe()` reports the **clip's** duration, candidates are planned against it, and the selector receives it — every stage after the trim is already clip-relative, on both the `rangeApplied` and ffmpeg-fallback branches. The claim is recorded here only so a future reader does not re-derive it and change working code.
 
 **`maxFrames: 0` is accepted as an alias for `frames: "none"`.** The enum is the documented way to ask for a transcript alone, but a zero budget means the same thing and should not error. The description mentions both, since an agent reasoning about budgets may reach for the number before the enum.
 
