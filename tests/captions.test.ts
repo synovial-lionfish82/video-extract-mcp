@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVtt, chooseCaptionTier } from '../src/transcript/captions.js';
+import { parseVtt, chooseCaptionTier, clampSegmentsToRange } from '../src/transcript/captions.js';
 
 const VTT = `WEBVTT
 
@@ -51,6 +51,28 @@ Long video segment
     // 1h 23m 45.5s = 3600 + 1380 + 45.5 = 5025.5
     // 2h 10m 30.25s = 7200 + 600 + 30.25 = 7830.25
     expect(s[0]).toEqual({ start: 5025.5, end: 7830.25, text: 'Long video segment' });
+  });
+});
+
+describe('clampSegmentsToRange', () => {
+  const segs = [
+    { start: 0.5, end: 1.5, text: 'before' },
+    { start: 4, end: 5, text: 'inside' },
+    { start: 8, end: 12, text: 'straddles-end' },
+    { start: 20, end: 21, text: 'after' },
+  ];
+  it('drops segments outside the range and re-bases the rest to clip time', () => {
+    expect(clampSegmentsToRange(segs, 3, 10)).toEqual([
+      { start: 1, end: 2, text: 'inside' },
+      { start: 5, end: 7, text: 'straddles-end' }, // truncated at the clip's end
+    ]);
+  });
+  it('truncates a segment straddling the range start to clip time zero', () => {
+    expect(clampSegmentsToRange([{ start: 2, end: 4, text: 'straddles-start' }], 3, 10))
+      .toEqual([{ start: 0, end: 1, text: 'straddles-start' }]);
+  });
+  it('drops a segment that only touches the range boundary without overlap', () => {
+    expect(clampSegmentsToRange([{ start: 1, end: 3, text: 'ends-at-start' }], 3, 10)).toEqual([]);
   });
 });
 

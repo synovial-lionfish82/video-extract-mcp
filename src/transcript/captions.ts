@@ -29,6 +29,27 @@ export function parseVtt(vtt: string): TranscriptSegment[] {
   return out;
 }
 
+/**
+ * Re-bases full-video caption segments onto a [start, end] clip: keeps only
+ * segments overlapping the range, shifts them by -start, and clamps them to
+ * the clip's bounds. Needed because caption files always cover the WHOLE
+ * video with absolute timestamps (yt-dlp writes subtitle tracks whole even
+ * under --download-sections), while a ranged analysis works on a 0-based
+ * clip -- without this, every transcriptWindow is offset by `start` seconds.
+ * (ASR output needs no such treatment: it is produced FROM the clip.)
+ */
+export function clampSegmentsToRange(
+  segments: TranscriptSegment[], start: number, end: number,
+): TranscriptSegment[] {
+  return segments
+    .filter((s) => s.end > start && s.start < end)
+    .map((s) => ({
+      start: Math.max(0, s.start - start),
+      end: Math.min(end - start, s.end - start),
+      text: s.text,
+    }));
+}
+
 /** Spec §9: accuracy-biased. Auto captions are only trusted in fast mode. */
 export function chooseCaptionTier(
   captions: { manual: CaptionTrack | null; auto: CaptionTrack | null },

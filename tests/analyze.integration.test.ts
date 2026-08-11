@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { makeTestVideo } from '../src/media/ffmpeg.js';
@@ -39,6 +39,10 @@ vi.mock('../dist/vision/quality.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../dist/vision/quality.js')>();
   return { ...real, filterCandidates: vi.fn(real.filterCandidates) };
 });
+vi.mock('../dist/resolve/index.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../dist/resolve/index.js')>();
+  return { ...real, resolve: vi.fn(real.resolve) };
+});
 
 // Imported AFTER the vi.mock calls above (textually and, more importantly,
 // semantically -- vitest hoists vi.mock factories ahead of all imports in
@@ -49,6 +53,7 @@ const { analyzeVideo } = await import('../dist/analyze.js');
 const { buildManifest } = await import('../dist/manifest.js');
 const { embedImages } = await import('../dist/vision/embed.js');
 const { filterCandidates } = await import('../dist/vision/quality.js');
+const { resolve } = await import('../dist/resolve/index.js');
 
 /** A deterministic, distinct, already-unit-norm 768-dim vector per index. */
 function unitVec(i: number): number[] {
@@ -179,6 +184,51 @@ describe('analyzeVideo (local file, end to end)', () => {
     },
     900_000,
   );
+});
+
+describe('analyzeVideo -- range + captions alignment (B3)', () => {
+  it('re-bases full-video caption timestamps to the requested range so transcript and frames agree', async () => {
+    // Caption files always cover the FULL video with ABSOLUTE timestamps
+    // (verified: yt-dlp writes subtitle tracks whole even under
+    // --download-sections), while the analyzed media is a 0-based clip.
+    // Without re-basing, every transcriptWindow is shifted by `start`
+    // seconds and the manifest carries the whole video's transcript
+    // against a short frame set.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-range-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const vtt = join(dir, 'caps.vtt');
+    writeFileSync(vtt, [
+      'WEBVTT', '',
+      '00:00:00.500 --> 00:00:01.500', 'BEFORE_RANGE_MARKER', '',
+      '00:00:04.000 --> 00:00:05.000', 'ALPHA_MARKER', '',
+      '00:00:08.000 --> 00:00:08.500', 'OMEGA_MARKER', '',
+    ].join('\n'));
+
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: { path: vtt, language: 'en' }, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+
+    const m = await analyzeVideo('https://range.example/watch?v=x', {
+      start: 3, end: 9, maxFrames: 4, outDir: join(dir, 'out'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.transcript).not.toBeNull();
+    expect(m.transcript!.source).toBe('manual');
+    // Clip-relative and clipped: the pre-range cue is gone, the others are
+    // shifted by exactly -start. (Cue times chosen to subtract exactly in
+    // binary floating point.)
+    expect(m.transcript!.segments).toEqual([
+      { start: 1, end: 2, text: 'ALPHA_MARKER' },
+      { start: 5, end: 5.5, text: 'OMEGA_MARKER' },
+    ]);
+    // And no frame's aligned window may quote text from before the range.
+    expect(m.frames.length).toBeGreaterThan(0);
+    for (const f of m.frames) {
+      expect(f.transcriptWindow ?? '').not.toContain('BEFORE_RANGE_MARKER');
+    }
+  }, 120_000);
 });
 
 describe('analyzeVideo -- issue 1: a failed embedding must not be preferentially selected', () => {

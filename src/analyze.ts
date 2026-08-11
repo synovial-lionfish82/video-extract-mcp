@@ -11,7 +11,7 @@ import { ocrFrame, computeTextNovelty } from './vision/ocr.js';
 import { embedImages } from './vision/embed.js';
 import { selectFrames } from './vision/select.js';
 import { attachTranscript } from './align.js';
-import { parseVtt, chooseCaptionTier } from './transcript/captions.js';
+import { parseVtt, chooseCaptionTier, clampSegmentsToRange } from './transcript/captions.js';
 import { chooseAsrEngine } from './transcript/routing.js';
 import { transcribeAudio } from './transcript/asr.js';
 import { buildManifest } from './manifest.js';
@@ -71,12 +71,20 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
     if (tier !== 'asr') {
       const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
       if (existsSync(track.path)) {
+        let segments = parseVtt(readFileSync(track.path, 'utf8'));
+        if (opts.start !== undefined && opts.end !== undefined) {
+          // Caption files carry ABSOLUTE full-video timestamps while the
+          // media here is a 0-based clip (whether the resolver applied the
+          // range or trim() did just above) -- re-base them or every
+          // transcriptWindow is shifted by `start` seconds.
+          segments = clampSegmentsToRange(segments, opts.start, opts.end);
+        }
         transcript = {
           // The TRACK's own language, not the video's: a deliberately-picked
           // English caption file for a French video is in English.
           language: track.language ?? res.languageHint ?? 'unknown',
           source: tier,
-          segments: parseVtt(readFileSync(track.path, 'utf8')),
+          segments,
         };
       }
     }
