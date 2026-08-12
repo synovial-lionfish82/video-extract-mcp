@@ -293,18 +293,78 @@ describe('batching (spec §3-§5)', () => {
   });
 
   it('hooks: run wraps each item, onStage/onQueued carry the item index', async () => {
+    // analyzeMock must actually DRIVE onStage (via opts.onStage) for this test
+    // to exercise anything -- an unconfigured mock resolves `undefined` and
+    // analyzeOneVideoAttempt throws before onStage is ever reached, so a mock
+    // that never touches onStage/onQueued cannot prove their index attribution
+    // either way. Item 0 ('/a') is delayed so item 1 ('/b') completes first --
+    // the discriminating condition: a correct per-iteration `i` binding
+    // (analyzeVideoTool's `.map((item, i) => ...)`) reports the right index no
+    // matter which item's async work finishes last, whereas a shared,
+    // reassigned counter closed over by reference would -- by the time the
+    // LATE item's callback finally fires -- already reflect the loop's final
+    // value, reporting the SAME wrong index for whichever item is slowest,
+    // regardless of firing order.
+    analyzeMock.mockImplementation(async (url: string, opts: { onStage?: (s: string) => void }) => {
+      if (url.endsWith('/a')) await new Promise((res) => setTimeout(res, 20));
+      opts?.onStage?.('resolving');
+      return manifest({ source: { url, platform: 'p', title: 'T', duration: 10, resolvedBy: 'ytdlp', status: 'ok', filePath: '/x/work.mp4' } });
+    });
     const dir = mkdtempSync(join(tmpdir(), 'norma-batch-hooks-'));
-    const ran: number[] = []; const staged: Array<[number, string]> = [];
-    let live = 0, peak = 0;
+    const ran: number[] = []; const staged: Array<[number, string]> = []; const queued: Array<[number, number]> = [];
+    let live = 0, peak = 0, aheadCounter = 0;
     await analyzeVideoTool(
       { destinationPath: dir, videos: [{ pathOrUrl: 'https://x.test/a' }, { pathOrUrl: 'https://x.test/b' }] },
       {
-        run: async (fn) => { live++; peak = Math.max(peak, live); ran.push(live); const r = await fn(); live--; return r; },
+        run: async (fn, onQueued) => {
+          live++; peak = Math.max(peak, live); ran.push(live);
+          onQueued(aheadCounter++);                      // distinct value per item, forwarded via hooks.onQueued below
+          const r = await fn(); live--; return r;
+        },
         onStage: (i, s) => staged.push([i, s]),
+        onQueued: (i, ahead) => queued.push([i, ahead]),
         onItemStart: (i) => staged.push([i, 'start']),
       },
     );
     expect(ran).toHaveLength(2);                       // every item went through run
+    expect(peak).toBe(2);                              // both items were genuinely in flight together, not serialized
     expect(staged.filter(([, s]) => s === 'start').map(([i]) => i).sort()).toEqual([0, 1]);
+    // Positional, not sorted-then-compared: a closure that captured the wrong
+    // (shared, stale) index would still often produce the right SET for the
+    // synchronous onItemStart entries above, but onStage fires from inside the
+    // (here, deliberately delayed-for-item-0) mocked analyzeVideo call -- late
+    // enough that a shared-counter bug reports the loop's final value instead
+    // of the item's own index. Item 1 finishes first (no delay), item 0
+    // finishes last (20ms delay); both must still show their OWN index.
+    expect(staged).toContainEqual([0, 'resolving']);
+    expect(staged).toContainEqual([1, 'resolving']);
+    // onQueued's ahead value is assigned by call order (item 0's run() call
+    // happens before item 1's, synchronously, per Promise.all(map(...))) --
+    // 0 for item 0, 1 for item 1 -- so correct attribution means exactly the
+    // pairs below, not e.g. both landing on the same (stale) index.
+    expect(queued).toContainEqual([0, 0]);
+    expect(queued).toContainEqual([1, 1]);
+  });
+
+  it('N=2: one item genuinely rejects (not a failure status) and the sibling still lands ok -- per-item no-throw guarantee holds at N=2', async () => {
+    // Distinct from the 'partial failure' test above, which mocks analyzeVideo
+    // resolving to a status-carrying failure manifest. Here analyzeVideo itself
+    // REJECTS for one item -- proving analyzeOneVideo's own try/catch boundary
+    // (already proven at N=1 by "returns a structured failure instead of
+    // throwing when analyzeVideo itself rejects unexpectedly" above) isolates
+    // each item independently inside Promise.all, rather than one item's
+    // rejection taking down the whole batch call.
+    analyzeMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/boom')) throw new Error('pipeline exploded');
+      return manifest({ source: { url, platform: 'p', title: 'T', duration: 10, resolvedBy: 'ytdlp', status: 'ok', filePath: '/x/work.mp4' } });
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'norma-batch-throw-'));
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [
+      { pathOrUrl: 'https://x.test/ok' }, { pathOrUrl: 'https://x.test/boom' },
+    ]});
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[1]!.status).not.toBe('ok');
+    expect(r.videos[1]!.reason).toContain('pipeline exploded');
+    expect(r.videos[1]!.manifestPath).toBe(join(dir, 'video-2', 'manifest.json'));
   });
 });
