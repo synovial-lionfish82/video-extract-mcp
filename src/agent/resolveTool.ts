@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Chapter } from '../types.js';
 import { resolve } from '../resolve/index.js';
+import { trim } from '../media/ffmpeg.js';
 import { descriptionPreview, mediaFileName, writeMetadata } from './artifacts.js';
 
 export interface ResolveToolResult {
@@ -32,7 +33,7 @@ export interface ResolveToolArgs {
   comments?: boolean;
 }
 
-export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveToolResult> {
+async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveToolResult> {
   const returnVideo = args.returnVideo ?? false;
   mkdirSync(args.destinationPath, { recursive: true });
 
@@ -61,23 +62,48 @@ export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveTo
     return { status: r.status, reason, metadataPath };
   }
 
+  // Range extraction is genuine for yt-dlp sources but is a documented
+  // full-download-then-trim for direct URLs and WeChat (design §5) -- those
+  // resolvers never read opts.start/opts.end at all (src/resolve/direct.ts,
+  // src/resolve/wechat.ts) and always leave rangeApplied false. Without this
+  // step, a range request against one of those sources would silently
+  // return the FULL video under a full-fetch filename, with no clip fields
+  // and no offset note -- an honest-looking but incomplete reply. Mirrors
+  // analyze.ts:100-122: trim locally when the resolver could not, and treat
+  // the result as a genuine clip. Deliberately NOT wrapped in a local
+  // try/catch, matching analyze.ts's own shape -- a trim failure (corrupt
+  // source, ffmpeg unavailable) propagates to resolveVideoTool's outer
+  // boundary below and becomes an honest failure result, rather than
+  // silently falling back to returning the wrong (untrimmed) video under a
+  // clip-shaped name.
+  let sourcePath = r.filePath;
+  let appliedStart = r.clipStart;
+  let appliedEnd = r.clipEnd;
+  if (returnVideo && args.start !== undefined && args.end !== undefined && !r.rangeApplied) {
+    sourcePath = await trim(r.filePath, args.start, args.end, join(workDir, 'clip.mp4'));
+    appliedStart = args.start;
+    appliedEnd = args.end;
+  }
+
+  // Spec §5.1: the saved metadata must record the applied range, whether the
+  // resolver applied it or the local trim above just did.
   const metadataPath = writeMetadata(args.destinationPath, {
     url: args.url, platform: r.platform, resolvedBy: r.resolvedBy,
-    clipStart: r.clipStart, clipEnd: r.clipEnd,
+    clipStart: appliedStart, clipEnd: appliedEnd,
     captions: r.captions, languageHint: r.languageHint,
     ...(r.metadata ?? {}),
   });
 
   let videoPath: string | undefined;
-  if (returnVideo && existsSync(r.filePath)) {
+  if (returnVideo && existsSync(sourcePath)) {
     // Range is part of artifact identity (spec §7): a clip and a full fetch
     // coexist; re-fetching the SAME range overwrites in place.
-    videoPath = join(args.destinationPath, mediaFileName(r.clipStart, r.clipEnd));
-    try { renameSync(r.filePath, videoPath); }
-    catch { copyFileSync(r.filePath, videoPath); }
+    videoPath = join(args.destinationPath, mediaFileName(appliedStart, appliedEnd));
+    try { renameSync(sourcePath, videoPath); }
+    catch { copyFileSync(sourcePath, videoPath); }
   }
 
-  const clipped = r.clipStart !== undefined && r.clipEnd !== undefined;
+  const clipped = appliedStart !== undefined && appliedEnd !== undefined;
   return {
     status: 'ok',
     platform: r.platform,
@@ -89,7 +115,7 @@ export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveTo
     commentCount: r.metadata?.commentCount ?? null,
     metadataPath,
     ...(videoPath ? { videoPath } : {}),
-    ...(clipped ? { clipStart: r.clipStart, clipEnd: r.clipEnd } : {}),
+    ...(clipped ? { clipStart: appliedStart, clipEnd: appliedEnd } : {}),
     ...(returnVideo ? {} : {
       nextSteps:
         'Media was not downloaded. To fetch it, call resolve_video again with '
@@ -98,10 +124,39 @@ export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveTo
     }),
     ...(clipped && videoPath ? {
       note:
-        `The saved file is a clip and STARTS AT 0 -- it covers ${r.clipStart}s to `
-        + `${r.clipEnd}s of the original. Timestamps passed to analyze_video against `
-        + `this file are relative to the clip, so add ${r.clipStart} to convert back to `
+        `The saved file is a clip and STARTS AT 0 -- it covers ${appliedStart}s to `
+        + `${appliedEnd}s of the original. Timestamps passed to analyze_video against `
+        + `this file are relative to the clip, so add ${appliedStart} to convert back to `
         + 'original-video time. Passing the original URL instead keeps original timestamps.',
     } : {}),
   };
+}
+
+/**
+ * Documented contract (matching analyze.ts's analyzeVideo/analyzeResolved
+ * split): resolve_video RETURNS a structured result rather than throwing.
+ * resolveVideoToolAttempt can throw for reasons that have nothing to do
+ * with the URL or the resolver -- mkdirSync EEXIST when destinationPath
+ * already exists as a file (an ordinary caller mistake, not adversarial
+ * input), mediaFileName rejecting a contract-violating range, or both
+ * renameSync and its copyFileSync fallback failing. Anything not already
+ * absorbed into a structured ResolveFailure becomes an honest
+ * 'extractor_failed' result here instead of an uncaught rejection.
+ */
+export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveToolResult> {
+  try {
+    return await resolveVideoToolAttempt(args);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    let metadataPath = join(args.destinationPath, 'metadata.json');
+    try {
+      metadataPath = writeMetadata(args.destinationPath, { url: args.url, status: 'extractor_failed', message });
+    } catch {
+      // destinationPath itself may be unusable (e.g. it exists as a file,
+      // not a directory) -- metadataPath still names where it WOULD have
+      // gone, so the result shape stays stable even though nothing could
+      // actually be written there.
+    }
+    return { status: 'extractor_failed', reason: `resolve_video failed: ${message}`, metadataPath };
+  }
 }

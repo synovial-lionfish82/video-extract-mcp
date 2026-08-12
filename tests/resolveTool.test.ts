@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { makeTestVideo, probe } from '../src/media/ffmpeg.js';
 
 const resolveMock = vi.fn();
 vi.mock('../src/resolve/index.js', () => ({ resolve: (...a: unknown[]) => resolveMock(...a) }));
@@ -27,6 +28,17 @@ function realSourceFile(): string {
   const p = join(dir, 'source.mp4');
   writeFileSync(p, 'fake-video-bytes');
   return p;
+}
+
+/**
+ * A genuinely decodable video, unlike realSourceFile() above (which only
+ * needs to EXIST for the existsSync gate). The one test that trims for
+ * real needs ffmpeg to actually be able to decode the input, or trim()
+ * fails for the wrong reason and the test would prove nothing.
+ */
+async function realTestVideo(seconds = 6): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), 'norma-vid-'));
+  return makeTestVideo(join(dir, 'source.mp4'), seconds);
 }
 
 const ok = (over: Record<string, unknown> = {}) => ({
@@ -124,7 +136,14 @@ describe('resolveVideoTool', () => {
     // Mutation 5 (direction A): the note missing when a range WAS applied.
     // Also confirms the video is actually saved under the range-encoded
     // filename (spec §7), not just that a truthy string exists.
-    resolveMock.mockResolvedValue(ok({ clipStart: 724, clipEnd: 1200 }));
+    // rangeApplied:true is required alongside clipStart/clipEnd: the real
+    // resolver contract only ever populates the latter when the former is
+    // true (Task 4's fix), and since the Finding-1 local-trim fallback
+    // below now genuinely inspects rangeApplied, an inconsistent fixture
+    // (clipStart/clipEnd set, rangeApplied left false) would wrongly
+    // trigger a real trim attempt against this fixture's non-decodable
+    // stand-in file.
+    resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 724, clipEnd: 1200 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
       url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 724, end: 1200,
@@ -136,30 +155,50 @@ describe('resolveVideoTool', () => {
     expect(basename(r.videoPath!)).toBe('source_s724_e1200.mp4');
   });
 
-  it('omits the clip-offset note when a range was requested but not applied (spec §5.1)', async () => {
-    // Mutation 5 (direction B) -- the one the brief's own test 7 cannot
-    // catch. The caller still asks for start:724/end:1200, but the mocked
-    // resolve() reports NO clipStart/clipEnd (rangeApplied stays false,
-    // exactly as ytdlp.ts leaves it when --download-sections did not take,
-    // or as any source that only supports full-then-trim can leave it).
-    // args.start/args.end and r.clipStart/r.clipEnd DISAGREE here, so this
-    // is the only test that can tell apart an implementation keyed off the
-    // caller's request from one keyed off what the resolver actually did.
-    // Two independent things must both key off r.clipStart, not args: the
-    // note's gating, AND mediaFileName's arguments (an implementation that
-    // names the file via args.start/args.end would produce
-    // "source_s724_e1200.mp4" for what is actually the untrimmed full
-    // video -- precisely the §7 collision the design calls out).
-    resolveMock.mockResolvedValue(ok());
+  it('keys the clip fields, filename and note off the range genuinely applied, never the range requested (spec §5.1)', async () => {
+    // Mutation 5 (both forms) -- the one the brief's own test 7 cannot
+    // catch, since its args and r.clipStart happen to agree. This uses the
+    // realistic source of disagreement design §18 documents: yt-dlp cuts
+    // snap to keyframes, so the range actually applied (700-1150) can
+    // differ slightly from the range requested (724-1200). rangeApplied is
+    // true here, so the Finding-1 local-trim fallback correctly does NOT
+    // fire (nothing further needs trimming) -- this isolates the
+    // note/clip-field/filename gating logic specifically.
+    // Two independent things must both key off r.clipStart/r.clipEnd, not
+    // args.start/args.end: the note's content, AND mediaFileName's
+    // arguments (an implementation that names the file via args.start/
+    // args.end would produce "source_s724_e1200.mp4" for a file that was
+    // actually saved as 700-1150 -- precisely the §7 collision the design
+    // calls out, since a later request for the true 700-1150 clip would
+    // then collide with this wrongly-named one).
+    resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 700, clipEnd: 1150 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
       url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 724, end: 1200,
     });
+    expect(r.clipStart).toBe(700);
+    expect(r.clipEnd).toBe(1150);
+    expect(r.note).toContain('700');
+    expect(r.note).not.toContain('724');
+    expect(r.videoPath).toBeDefined();
+    expect(basename(r.videoPath!)).toBe('source_s700_e1150.mp4');
+  });
+
+  it('omits the clip-offset note and clip fields when returnVideo is false, even if a range is requested', async () => {
+    // Complementary "not applied" case: Finding 1's local-trim fallback is
+    // itself gated on returnVideo (there is no media to trim when none was
+    // fetched), so with returnVideo left false the result must still look
+    // exactly like an ordinary metadata-only reply -- no note, no clip
+    // fields, no videoPath -- even though start/end were supplied.
+    resolveMock.mockResolvedValue(ok());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({
+      url: 'https://x/v', destinationPath: dir, start: 724, end: 1200,
+    });
     expect(r.note).toBeUndefined();
     expect(r.clipStart).toBeUndefined();
     expect(r.clipEnd).toBeUndefined();
-    expect(r.videoPath).toBeDefined();
-    expect(basename(r.videoPath!)).toBe('source.mp4');
+    expect(r.videoPath).toBeUndefined();
   });
 
   it('returns a failure shape without throwing', async () => {
@@ -195,5 +234,81 @@ describe('resolveVideoTool', () => {
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
     expect(existsSync(r.metadataPath)).toBe(true);
+  });
+
+  it('forwards start/end to resolve() only when fetching, never on a metadata-only call', async () => {
+    // Minor gap: forwarding was correct but untested -- a mutant that
+    // forwards args.start/args.end unconditionally (dropping the
+    // `returnVideo ? args.start : undefined` ternary) survived all 11
+    // prior tests, since none of them inspected the resolve() call args on
+    // a metadata-only request.
+    resolveMock.mockResolvedValue(ok());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, start: 30, end: 60 });
+    expect(resolveMock.mock.calls[0]![1].start).toBeUndefined();
+    expect(resolveMock.mock.calls[0]![1].end).toBeUndefined();
+  });
+
+  it('trims locally when the resolver could not apply the range itself (spec §5, direct/WeChat sources)', async () => {
+    // src/resolve/direct.ts and src/resolve/wechat.ts never read
+    // opts.start/opts.end at all and always leave rangeApplied false --
+    // verified directly by reading both files. A mocked 'direct' result
+    // with no clipStart/clipEnd, rangeApplied:false, stands in for that
+    // real shape; a genuinely decodable source file lets this test prove a
+    // REAL trim happened, not just that the naming/note logic ran.
+    const video = await realTestVideo(6);
+    resolveMock.mockResolvedValue(ok({
+      filePath: video, platform: 'direct', resolvedBy: 'direct', rangeApplied: false,
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({
+      url: 'https://x/direct.mp4', destinationPath: dir, returnVideo: true, start: 1, end: 3,
+    });
+    expect(r.status).toBe('ok');
+    expect(r.videoPath).toBeDefined();
+    expect(basename(r.videoPath!)).toBe('source_s1_e3.mp4');
+    expect(r.clipStart).toBe(1);
+    expect(r.clipEnd).toBe(3);
+    expect(r.note).toMatch(/starts at 0|begins at zero/i);
+    expect(r.note).toContain('1');
+    // Not just correctly named -- genuinely shorter: proves ffmpeg actually
+    // trimmed the file rather than the full 6s file being renamed under a
+    // clip-shaped name.
+    const trimmed = await probe(r.videoPath!);
+    expect(trimmed.duration).toBeLessThan(4);
+    const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
+    expect(saved.clipStart).toBe(1);
+    expect(saved.clipEnd).toBe(3);
+  });
+
+  it('surfaces a local trim failure as a structured failure instead of throwing', async () => {
+    // realSourceFile()'s bytes are not a decodable video, so ffmpeg's
+    // trim() genuinely fails here (not simulated) -- proving the
+    // deliberately-uncaught trim() call in the implementation really does
+    // reach resolveVideoTool's outer exception boundary rather than
+    // crashing the whole call.
+    resolveMock.mockResolvedValue(ok({ platform: 'direct', resolvedBy: 'direct', rangeApplied: false }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({
+      url: 'https://x/direct.mp4', destinationPath: dir, returnVideo: true, start: 1, end: 3,
+    });
+    expect(r.status).not.toBe('ok');
+    expect(r.videoPath).toBeUndefined();
+  });
+
+  it('returns a structured failure instead of throwing when destinationPath exists as a file (EEXIST)', async () => {
+    // Reproduced by the reviewer: an ordinary caller mistake (confusing a
+    // file path with a directory path, or reusing a stale one) throws
+    // EEXIST from mkdirSync before resolve() is ever called -- previously
+    // an uncaught rejection, breaking the "returns a result, never throws"
+    // contract every other failure path in this module honours.
+    resolveMock.mockResolvedValue(ok());
+    const parent = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const notADir = join(parent, 'blocked');
+    writeFileSync(notADir, 'i am a file, not a directory');
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: notADir });
+    expect(r.status).not.toBe('ok');
+    expect(typeof r.metadataPath).toBe('string');
+    expect(r.videoPath).toBeUndefined();
   });
 });
