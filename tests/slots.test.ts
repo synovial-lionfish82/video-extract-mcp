@@ -53,6 +53,25 @@ describe('createSlotPool', () => {
     expect(pool.running).toBe(0);
     expect(pool.queued).toBe(0);
   });
+
+  it('counters are accurate immediately after bare await (resolve path)', async () => {
+    const pool = createSlotPool(1);
+    await pool.run(async () => 'x');
+    // No microtask lag: running/queued must be 0 right now, not on the next tick.
+    expect(pool.running).toBe(0);
+    expect(pool.queued).toBe(0);
+  });
+
+  it('counters are accurate immediately after bare await (reject path)', async () => {
+    const pool = createSlotPool(1);
+    try {
+      await pool.run(async () => { throw new Error('test'); });
+    } catch {
+      // ignore
+    }
+    expect(pool.running).toBe(0);
+    expect(pool.queued).toBe(0);
+  });
 });
 
 describe('env readers', () => {
@@ -74,6 +93,8 @@ describe('env readers', () => {
     expect(taskTtlMsFromEnv()).toBe(1_800_000);
     vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', '60000');
     expect(taskTtlMsFromEnv()).toBe(60_000);
+    vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', '0');
+    expect(taskTtlMsFromEnv()).toBe(1);   // explicit but nonsensical -> floor
     vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', 'soon');
     expect(taskTtlMsFromEnv()).toBe(1_800_000);
   });

@@ -22,6 +22,7 @@ export function createSlotPool(max: number): SlotPool {
       next.start();
     }
     // Everyone still waiting just moved up; tell them where they stand.
+    // O(n) re-report per release: O(n^2) per full drain (~10^5 callbacks for 500-deep queue).
     waiters.forEach((w, i) => w.onQueued?.(i + 1));
   };
   return {
@@ -29,7 +30,12 @@ export function createSlotPool(max: number): SlotPool {
     get queued() { return waiters.length; },
     run<T>(fn: () => Promise<T>, onQueued?: (ahead: number) => void): Promise<T> {
       return new Promise<T>((resolve, reject) => {
-        const start = () => fn().then(resolve, reject).finally(() => { running--; pump(); });
+        // Ordering: running-- MUST come before resolve/reject/pump().
+        // If pump() ran first and a waiter's onQueued callback threw, the current caller would hang.
+        const start = () => fn().then(
+          (v) => { running--; resolve(v); pump(); },
+          (e) => { running--; reject(e); pump(); },
+        );
         if (running < max && waiters.length === 0) {
           running++;
           start();
