@@ -68,7 +68,11 @@ export function buildServer(): McpServer {
         end: z.number().optional().describe('End second of the section to fetch. Only meaningful with returnVideo: true. Provide with start; either alone is ignored and the whole video is fetched.'),
         comments: z.boolean().optional().default(false).describe('Also fetch comments into the metadata file. Off by default: can be very slow on popular videos.'),
       },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      // Fix 4(c): both tools write to the user's filesystem (metadata,
+      // media, manifest, transcript, frames) and resolve_video moves a
+      // caller-owned file in one branch -- readOnlyHint:true was false, and
+      // clients make trust decisions on this annotation.
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {
       const r = await resolveVideoTool(args);
@@ -88,7 +92,9 @@ export function buildServer(): McpServer {
         + 'the reply is a summary plus those paths, with the transcript included inline '
         + 'when it is short. Use start/end to analyze only part of a video -- for '
         + 'supported sources only that section is downloaded, and the transcript covers '
-        + 'just that section. frames controls how frames are chosen: "key" (default) picks '
+        + 'just that section (the single-instant recipe below is the one exception: '
+        + 'nothing is trimmed there, so a transcript, if requested, covers the whole '
+        + 'video, not just the instant). frames controls how frames are chosen: "key" (default) picks '
         + 'the most informative ones, "even" samples the range uniformly (maxFrames over '
         + 'the window sets the density, so 60 frames across 30 seconds is 2 per second), '
         + 'and "none" returns no frames at all, which is how you ask for a transcript '
@@ -107,13 +113,17 @@ export function buildServer(): McpServer {
         pathOrUrl: z.string().describe('A video URL, or a path to a video file already on this machine. Both are accepted.'),
         destinationPath: z.string().describe('Directory to write the manifest, transcript and frames into. Created if missing.'),
         start: z.number().optional().describe('Start second of the range to analyze. Provide with end; either alone is ignored. Note that if pathOrUrl is a clip previously fetched with a range, times are relative to that clip, which starts at 0.'),
-        end: z.number().optional().describe('End second of the range. Set equal to start for a single instant.'),
+        end: z.number().optional().describe('End second of the range. For a single instant, set this equal to start -- but only with frames: "even"; the default "key" mode fails on a zero-length range.'),
         frames: z.enum(['key', 'even', 'none']).optional().describe('"key" (default): the most informative frames, deduplicated. "even": uniform sampling across the range. "none": no frames (transcript only).'),
         maxFrames: z.number().optional().default(35).describe('Maximum frames to return. With frames "even" this sets density across the range. 0 means the same as frames: "none", but only when frames is not given at all -- an explicit frames value always wins, so frames: "even", maxFrames: 0 stays "even".'),
         transcript: z.boolean().optional().default(true).describe('Produce a transcript. Set false to skip transcription entirely when you only want frames.'),
         language: z.string().optional().describe('Language hint such as "zh", "ja" or "en". Usually inferred from the platform; supply it when the source carries no language metadata or the guess is wrong.'),
       },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      // Fix 4(c): both tools write to the user's filesystem (metadata,
+      // media, manifest, transcript, frames) and resolve_video moves a
+      // caller-owned file in one branch -- readOnlyHint:true was false, and
+      // clients make trust decisions on this annotation.
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {
       const r = await analyzeVideoTool(args);

@@ -306,6 +306,38 @@ describe('YtDlpResolver caption acquisition against a faked yt-dlp (hermetic, no
     expect(r.clipStart).toBeUndefined();
     expect(r.clipEnd).toBeUndefined();
   });
+
+  it('does not request a download-sections range when only one bound is given (Fix 4b / deferred #20: half-specified range must be genuinely ignored)', async () => {
+    // ytdlp.ts:241's wantsRange gate requires BOTH opts.start and opts.end.
+    // Every OTHER range test in this file (and in resolveTool.test.ts)
+    // passes both bounds together, so an accidental `&&` -> `||` widening of
+    // that gate would survive all of them silently -- this is the one test
+    // that actually supplies just one bound to a download that is genuinely
+    // happening (returnVideo not false), which is what the gate exists to
+    // catch.
+    let captured: string[] = [];
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      captured = args;
+      copyFileSync(fixtureVideo, join(workDir, 'source.mp4'));
+      return {
+        stdout: `${JSON.stringify({
+          title: 'T', extractor: 'youtube',
+          subtitles: {}, automatic_captions: {}, requested_subtitles: null,
+        })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', {
+      workDir, start: 100, // end deliberately omitted
+    });
+    expect(captured).not.toContain('--download-sections');
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.rangeApplied).toBe(false);
+    expect(r.clipStart).toBeUndefined();
+    expect(r.clipEnd).toBeUndefined();
+  });
 });
 
 describe('WeChatHeadlessResolver.resolve() against a stubbed network (hermetic, no live calls)', () => {

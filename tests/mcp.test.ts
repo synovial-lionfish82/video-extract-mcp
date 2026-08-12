@@ -102,6 +102,22 @@ describe('v2 surface', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     await client.close();
   });
+
+  it('marks both tools as NOT read-only (Fix 4c): both write to the filesystem, and resolve_video moves a caller-owned file in one branch', async () => {
+    // The SDK defines readOnlyHint as "the tool does not modify its
+    // environment" -- both tools write metadata/manifest/transcript/frame
+    // files to destinationPath, so readOnlyHint:true was a false claim
+    // clients make trust decisions on. Reads the LIVE schema via
+    // listTools(), not a hardcoded constant compared to itself.
+    const client = await connectClient(buildServer());
+    const { tools } = await client.listTools();
+    for (const name of TOOL_NAMES) {
+      const tool = tools.find((t) => t.name === name);
+      if (!tool) throw new Error(`${name} not found in listTools()`);
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+    }
+    await client.close();
+  });
 });
 
 describe('resolve_video', () => {

@@ -79,6 +79,27 @@ describe('early exits (spec §8)', () => {
     expect(m.frames.length).toBeGreaterThan(0);
     expect(embedSpy).toHaveBeenCalled();
   }, 300_000);
+
+  it('ignores a half-specified range in even mode too (Fix 4b / deferred #20): a lone start does not narrow sampling', async () => {
+    // src/mcp.ts documents "provide with end; either alone is ignored" for
+    // analyze_video's start/end. Pre-fix, 'even' mode's own from/to fallback
+    // took a lone start independently of end, silently narrowing the
+    // sampling window to [start, duration) -- a three-way split (download
+    // full, transcript full, frames narrowed) nothing documented.
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const m = await analyzeVideo(video, {
+      start: 7, // end deliberately omitted -- video is the 9s fixture from beforeAll
+      frames: 'even', maxFrames: 3, transcript: false,
+      outDir: join(dir, 'half-range'),
+    });
+    expect(m.source.status).toBe('ok');
+    // If `start` alone had narrowed the window to [7, 9), every sampled
+    // frame would land at or after second 7 (evenTimestamps(7,9,3) is
+    // [7, 7.67, 8.33] -- all >= 7). With the bound genuinely ignored,
+    // sampling spans the full [0, 9) video instead (evenTimestamps(0,9,3)
+    // is [0, 3, 6]), so at least one frame must land before second 7.
+    expect(m.frames.some((f) => f.timestamp < 7)).toBe(true);
+  }, 300_000);
 });
 
 // task-3-brief.md's own reviewed follow-up (task-2-report.md, "minor

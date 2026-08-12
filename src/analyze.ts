@@ -213,8 +213,16 @@ async function analyzeResolved(
   let candidateCount = 0;
 
   if (frameMode === 'even') {
-    const from = opts.start ?? 0;
-    const to = opts.end ?? meta.duration;
+    // Fix 4(b): a half-specified range must be genuinely ignored here too,
+    // matching stage 2's own trim gate above and the documented "either
+    // alone is ignored" claim (src/mcp.ts) -- both bounds or neither.
+    // Falling back independently per-bound (the pre-fix shape) let a lone
+    // `start` silently narrow the sampling window to [start, duration) while
+    // leaving the download/transcript untouched: a three-way split nothing
+    // documented.
+    const bothBoundsGiven = opts.start !== undefined && opts.end !== undefined;
+    const from = bothBoundsGiven ? opts.start! : 0;
+    const to = bothBoundsGiven ? opts.end! : meta.duration;
     // `video` is already trimmed to [start,end] whenever clipRelative is
     // true (either the resolver applied the range, or stage 2's trim() did),
     // so sample in clip time. In the single-instant carve-out above,
