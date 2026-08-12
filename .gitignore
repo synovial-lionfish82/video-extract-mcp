@@ -13,3 +13,6 @@ frames/
 .superpowers/
 experiments/
 *.aiff
+
+# Private research notes — never publish
+extract-any-video+key-frames-selection+transcript.md
