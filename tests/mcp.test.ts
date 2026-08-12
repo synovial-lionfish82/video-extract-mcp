@@ -326,4 +326,44 @@ describe('analyze_video', () => {
     expect(manifest.source.url).toBe(badPath);
     await client.close();
   }, 15_000);
+
+  it('cleans up the working directory without breaking the coarse-to-fine handoff (Fix 6, deferred #18 leak half)', async () => {
+    // A REAL local-source, default-frame-mode ('key') call end to end --
+    // exactly the scenario deferred #18 describes: analyzeVideo runs against
+    // its own private mkdtempSync'd directory (outDir left unset for a local
+    // source) and leaves a re-encoded work.mp4 behind there once done. This
+    // is the brief's own explicit test: every path the REPLY and the
+    // MANIFEST point at must still exist afterward -- that is what stops
+    // the cleanup from deleting a file either one still references. The
+    // "leak is actually fixed" half (the ephemeral copy itself is gone) is
+    // proven at the unit level in tests/analyzeTool.test.ts, which has
+    // visibility into the ephemeral path a real end-to-end call does not.
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-cleanup-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 6);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-cleanup-'));
+    const client = await connectClient(buildServer());
+    const content = await callToolOk(client, {
+      name: 'analyze_video',
+      arguments: { pathOrUrl: video, destinationPath: destDir, maxFrames: 2, transcript: false },
+    });
+    const result = JSON.parse(firstText(content)) as {
+      status: string; videoPath?: string; framePaths: string[]; manifestPath: string;
+    };
+    expect(result.status).toBe('ok');
+    // The local source itself: never duplicated, never destroyed.
+    expect(result.videoPath).toBe(video);
+    expect(existsSync(result.videoPath!)).toBe(true);
+    // Every frame thumbnail the reply names.
+    expect(result.framePaths.length).toBeGreaterThan(0);
+    for (const p of result.framePaths) expect(existsSync(p)).toBe(true);
+    // And the manifest on disk agrees with the reply, not just the reply
+    // with itself.
+    expect(existsSync(result.manifestPath)).toBe(true);
+    const manifest = JSON.parse(readFileSync(result.manifestPath, 'utf8')) as {
+      source: { filePath?: string }; frames: Array<{ image: string }>;
+    };
+    expect(manifest.source.filePath).toBe(video);
+    for (const f of manifest.frames) expect(existsSync(f.image)).toBe(true);
+    await client.close();
+  }, 60_000);
 });

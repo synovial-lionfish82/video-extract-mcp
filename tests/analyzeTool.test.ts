@@ -195,4 +195,54 @@ describe('analyzeVideoTool', () => {
     const saved = JSON.parse(readFileSync(r.manifestPath, 'utf8'));
     expect(saved.frames[0].image).toBe(expectedFrame);
   });
+
+  it('cleans up analyzeVideo\'s orphaned working copy for a local source, without ever touching the caller\'s own file (Fix 6, deferred #18 leak half)', async () => {
+    // frameMode 'key' means analyzeVideo's own manifest.source.filePath
+    // points at its private, ephemeral re-encoded copy (work.mp4) -- a REAL
+    // file here, standing in for what normalizeVideo() actually produces.
+    // The rewrite above replaces source.filePath with args.pathOrUrl
+    // (`local`), so nothing in the final reply/manifest references the
+    // ephemeral copy any more once this call returns -- exactly the leak
+    // deferred #18 describes ("every local analyze_video call leaves a full
+    // re-encode... behind"). local !== ephemeralCopy is the load-bearing
+    // part of this fixture: an implementation that deleted based on `local`
+    // alone (not on whether the path actually changed) would ALSO destroy
+    // the caller's own file whenever frameMode wasn't 'key' and filePath
+    // already equalled pathOrUrl -- see the companion test below.
+    const src = mkdtempSync(join(tmpdir(), 'norma-src-'));
+    const local = join(src, 'clip.mp4');
+    writeFileSync(local, 'the-callers-own-video-bytes');
+    const workDir = mkdtempSync(join(tmpdir(), 'norma-work-'));
+    const ephemeralCopy = join(workDir, 'work.mp4');
+    writeFileSync(ephemeralCopy, 'analyzeVideos-own-reencoded-copy');
+    analyzeMock.mockResolvedValue(manifest({
+      source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: ephemeralCopy },
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
+    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
+    expect(r.status).toBe('ok');
+    expect(r.videoPath).toBe(local);
+    expect(existsSync(local)).toBe(true);
+    expect(existsSync(ephemeralCopy)).toBe(false);
+  });
+
+  it('does NOT delete the caller\'s own file when analyzeVideo already reports it verbatim as filePath (regression guard for the fix above)', async () => {
+    // The companion/negative case: when analyzeVideo's own filePath ALREADY
+    // equals pathOrUrl (the common case for 'even'/'none' frame modes, or
+    // any local source resolve() passes straight through unchanged), the
+    // cleanup must be a no-op -- deleting it here would destroy the file the
+    // reply itself points at, reintroducing a Fix-1-shaped data-loss bug
+    // through Fix 6 instead.
+    const src = mkdtempSync(join(tmpdir(), 'norma-src-'));
+    const local = join(src, 'clip.mp4');
+    writeFileSync(local, 'the-callers-own-video-bytes');
+    analyzeMock.mockResolvedValue(manifest({
+      source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: local },
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
+    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
+    expect(r.status).toBe('ok');
+    expect(r.videoPath).toBe(local);
+    expect(existsSync(local)).toBe(true);
+  });
 });

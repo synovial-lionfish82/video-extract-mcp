@@ -185,16 +185,25 @@ describe('media-stage cost (Fix 2: normalize()/WAV extraction pay only for what 
     expect(existsSync(join(outDir, 'work.mp4'))).toBe(false);
   }, 300_000);
 
-  it('positive control: key mode with a transcript DOES produce both work.mp4 and work.wav', async () => {
-    // Without this, the three negative assertions above could pass
-    // vacuously (an implementation that never produces either file under
-    // ANY circumstances would also pass them). This proves the opposite
-    // case still does the real work.
+  it('positive control: key mode DOES produce work.mp4', async () => {
+    // Without this, the three negative work.mp4 assertions above could pass
+    // vacuously (an implementation that never re-encodes under ANY
+    // circumstances would also pass them). This proves the opposite case
+    // still does the real work.
+    //
+    // No work.wav assertion here (there was one, pre-Fix-6): Fix 6 now
+    // deletes work.wav unconditionally once the transcript stage is done
+    // with it (deferred #18), so its POST-CALL absence is identical whether
+    // extraction genuinely ran and was cleaned up, or never ran at all --
+    // file existence can no longer distinguish the two once cleanup exists.
+    // The positive proof that extractAudio() is genuinely called under
+    // transcript:true now lives in tests/analyze.integration.test.ts's
+    // mocked-ffmpeg suite (the "extractAudio() throws" test requires the
+    // real call to have happened for the mock to have thrown at all).
     const { analyzeVideo } = await import('../dist/analyze.js');
     const outDir = join(dir, 'both-produced');
     const m = await analyzeVideo(video, { maxFrames: 2, outDir });
     expect(m.source.status).toBe('ok');
     expect(existsSync(join(outDir, 'work.mp4'))).toBe(true);
-    expect(existsSync(join(outDir, 'work.wav'))).toBe(true);
   }, 300_000);
 });

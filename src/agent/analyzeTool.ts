@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync, renameSync, copyFileSync } from 'node:fs';
+import { mkdirSync, existsSync, renameSync, copyFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { FrameMode, Manifest, Transcript } from '../types.js';
 import { analyzeVideo } from '../analyze.js';
@@ -67,6 +67,34 @@ function relocateFrame(destinationPath: string, imagePath: string): string {
   return dest;
 }
 
+/**
+ * Fix 6 (deferred #18, local-source leak half): for a local source,
+ * analyzeVideo ran against its own private mkdtempSync'd working directory
+ * (outDir was deliberately left unset above), and when frameMode is 'key'
+ * its manifest's source.filePath points at the re-encoded copy it made
+ * there (work.mp4) -- never cleaned up, so every local analyze_video call
+ * left a full re-encode behind (deferred #18). The rewrite below always
+ * replaces that path with args.pathOrUrl for a local source, so once it has
+ * happened, nothing in the final reply or manifest (`m`) references the
+ * pre-rewrite path any more -- it is an orphaned temp, not a second copy of
+ * anything the agent still needs.
+ *
+ * Comparing the pre- and post-rewrite VALUES -- not "is this a local
+ * source" -- is what keeps this safe: it is what the brief calls "check
+ * what the reply's videoPath and the manifest's source.filePath actually
+ * reference" before deleting anything. When frameMode isn't 'key', or no
+ * range was applied, analyzeVideo's own filePath is often ALREADY
+ * args.pathOrUrl (resolve()'s bare-local-path branch returns the caller's
+ * path back unchanged) -- rawFilePath === finalFilePath in that case, so
+ * this is a no-op, and the caller's own file is never touched. Only a
+ * genuinely different, analyzeVideo-created path is ever removed.
+ * Best-effort: a failed delete must never fail the call.
+ */
+function cleanupOrphanedCopy(rawFilePath: string | undefined, finalFilePath: string | undefined): void {
+  if (!rawFilePath || rawFilePath === finalFilePath) return;
+  try { rmSync(rawFilePath, { force: true }); } catch { /* best-effort */ }
+}
+
 async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeToolResult> {
   mkdirSync(args.destinationPath, { recursive: true });
 
@@ -109,6 +137,12 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
         frames: raw.frames.map((f) => ({ ...f, image: relocateFrame(args.destinationPath, f.image) })),
       }
     : raw;
+
+  // Fix 6: clean up analyzeVideo's own working copy once it has been
+  // superseded above -- see cleanupOrphanedCopy's doc comment for why this
+  // order (after computing `m`, comparing against the pre-rewrite `raw`) is
+  // what keeps it from ever touching a file the reply still points at.
+  cleanupOrphanedCopy(raw.source.filePath, m.source.filePath);
 
   const manifestPath = writeManifest(args.destinationPath, m);
 

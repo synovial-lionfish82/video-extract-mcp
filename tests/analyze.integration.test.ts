@@ -339,6 +339,25 @@ describe('analyzeVideo -- caption clamp time base on the single-instant carve-ou
   }, 120_000);
 });
 
+describe('analyzeVideo -- working directory cleanup (Fix 6, deferred #18 leak half)', () => {
+  it('deletes work.wav after the transcript stage is done with it, even though extraction genuinely ran', async () => {
+    // Combines two signals that only BOTH hold under a correct
+    // implementation: the spy proves extractAudio() genuinely ran (so this
+    // is not just Fix 2 skipping extraction for some unrelated reason), and
+    // the file-existence check proves Fix 6's cleanup then removed it.
+    // Nothing in Manifest ever references a wav path, so its absence can
+    // never break the coarse-to-fine handoff the way deleting work.mp4
+    // could -- this is deliberately the simpler, unconditional half.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-wavcleanup-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 6);
+    const outDir = join(dir, 'out');
+    const m = await analyzeVideo(v, { frames: 'none', outDir });
+    expect(m.source.status).toBe('ok');
+    expect(extractAudio).toHaveBeenCalled();
+    expect(existsSync(join(outDir, 'work.wav'))).toBe(false);
+  }, 60_000);
+});
+
 describe('analyzeVideo -- documented no-throw contract (media-stage throws become failure manifests)', () => {
   it('returns an honest failure manifest (and a real peakRssMb) when normalizeVideo() throws, instead of rejecting', async () => {
     // src/mcp.ts documents analyze_video as "returns a manifest rather than

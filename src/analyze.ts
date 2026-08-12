@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalyzeOptions, Manifest, Transcript, Candidate, SelectedFrame, FrameMode } from './types.js';
@@ -148,58 +148,72 @@ async function analyzeResolved(
     // whether a transcript runs at all, rather than unconditionally in
     // stage 3 above.
     const { audio } = await extractAudio(media, workDir);
-    // Spec §2.2 ("Removed: mode and fps"): the caller-facing fast/accurate
-    // dial is gone and accuracy bias becomes UNCONDITIONAL -- human-authored
-    // captions win when present, otherwise local ASR runs; platform
-    // auto-captions are never substituted in. chooseCaptionTier's own
-    // 'fast' branch is untouched and still covered directly by
-    // tests/captions.test.ts; this call site just never reaches it anymore.
-    const tier = chooseCaptionTier(res.captions, 'accurate');
-    if (tier !== 'asr') {
-      const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
-      if (existsSync(track.path)) {
-        let segments = parseVtt(readFileSync(track.path, 'utf8'));
-        // Caption files carry ABSOLUTE full-video timestamps. `clipRelative`
-        // (declared at :99, set true at :120) is true exactly when `video`
-        // -- and therefore every frame timestamp -- has been re-based onto a
-        // 0-based clip, whether the resolver applied the range itself or
-        // stage 2's trim() did, so only then must captions be re-based too,
-        // or every transcriptWindow would be shifted by `start` seconds.
-        // Gating on `clipRelative` in addition to opts.start/opts.end (the
-        // same flag stage 5-7 already uses at :212-213) is what keeps this
-        // correct on the 'even'+start===end carve-out above: there
-        // clipRelative stays false, trim() never ran, and both `video` and
-        // every frame timestamp stay in ABSOLUTE time, so clamping here
-        // would be exactly the bug this gate exists to avoid --
-        // clampSegmentsToRange(segs, start, start) would collapse a caption
-        // straddling `start` to a zero-width {0,0} segment that no longer
-        // lines up with the frame's real (absolute) timestamp, silently
-        // corrupting transcript.segments rather than just transcriptWindow.
-        if (opts.start !== undefined && opts.end !== undefined && clipRelative) {
-          segments = clampSegmentsToRange(segments, opts.start, opts.end);
+    try {
+      // Spec §2.2 ("Removed: mode and fps"): the caller-facing fast/accurate
+      // dial is gone and accuracy bias becomes UNCONDITIONAL -- human-authored
+      // captions win when present, otherwise local ASR runs; platform
+      // auto-captions are never substituted in. chooseCaptionTier's own
+      // 'fast' branch is untouched and still covered directly by
+      // tests/captions.test.ts; this call site just never reaches it anymore.
+      const tier = chooseCaptionTier(res.captions, 'accurate');
+      if (tier !== 'asr') {
+        const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
+        if (existsSync(track.path)) {
+          let segments = parseVtt(readFileSync(track.path, 'utf8'));
+          // Caption files carry ABSOLUTE full-video timestamps. `clipRelative`
+          // (declared at :99, set true at :120) is true exactly when `video`
+          // -- and therefore every frame timestamp -- has been re-based onto a
+          // 0-based clip, whether the resolver applied the range itself or
+          // stage 2's trim() did, so only then must captions be re-based too,
+          // or every transcriptWindow would be shifted by `start` seconds.
+          // Gating on `clipRelative` in addition to opts.start/opts.end (the
+          // same flag stage 5-7 already uses at :212-213) is what keeps this
+          // correct on the 'even'+start===end carve-out above: there
+          // clipRelative stays false, trim() never ran, and both `video` and
+          // every frame timestamp stay in ABSOLUTE time, so clamping here
+          // would be exactly the bug this gate exists to avoid --
+          // clampSegmentsToRange(segs, start, start) would collapse a caption
+          // straddling `start` to a zero-width {0,0} segment that no longer
+          // lines up with the frame's real (absolute) timestamp, silently
+          // corrupting transcript.segments rather than just transcriptWindow.
+          if (opts.start !== undefined && opts.end !== undefined && clipRelative) {
+            segments = clampSegmentsToRange(segments, opts.start, opts.end);
+          }
+          transcript = {
+            // The TRACK's own language, not the video's: a deliberately-picked
+            // English caption file for a French video is in English.
+            language: track.language ?? res.languageHint ?? 'unknown',
+            source: tier,
+            segments,
+          };
         }
-        transcript = {
-          // The TRACK's own language, not the video's: a deliberately-picked
-          // English caption file for a French video is in English.
-          language: track.language ?? res.languageHint ?? 'unknown',
-          source: tier,
-          segments,
-        };
       }
-    }
-    if (!transcript && existsSync(audio)) {
-      // preferredLanguage is passed through (not dropped): pickSenseVoiceLanguage
-      // falls back to it when SenseVoice's own raw per-segment language signal
-      // isn't usable (routing.ts; the common case on the current sherpa-onnx-node
-      // build per task-11-report.md), so wiring it through is what lets a
-      // caller-declared language reach transcript.language honestly instead of
-      // silently downgrading to 'auto'.
-      transcript = await transcribeAudio(audio, { engine, preferredLanguage: opts.preferredLanguage }).catch((e: unknown) => {
-        // Same silent-degrade class as OCR/embeddings below: a null
-        // transcript is otherwise indistinguishable from "no speech found".
-        warnings.push(`asr failed: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      });
+      if (!transcript && existsSync(audio)) {
+        // preferredLanguage is passed through (not dropped): pickSenseVoiceLanguage
+        // falls back to it when SenseVoice's own raw per-segment language signal
+        // isn't usable (routing.ts; the common case on the current sherpa-onnx-node
+        // build per task-11-report.md), so wiring it through is what lets a
+        // caller-declared language reach transcript.language honestly instead of
+        // silently downgrading to 'auto'.
+        transcript = await transcribeAudio(audio, { engine, preferredLanguage: opts.preferredLanguage }).catch((e: unknown) => {
+          // Same silent-degrade class as OCR/embeddings below: a null
+          // transcript is otherwise indistinguishable from "no speech found".
+          warnings.push(`asr failed: ${e instanceof Error ? e.message : String(e)}`);
+          return null;
+        });
+      }
+    } finally {
+      // Fix 6 (deferred #18, leak half): nothing downstream ever references
+      // work.wav -- Manifest has no field for it -- so it is always safe to
+      // remove once this stage is done with it, whether that stage ended in
+      // a transcript, a degraded-but-recorded ASR failure, or (via this
+      // finally) an unexpected throw from caption parsing. Best-effort: a
+      // failed delete must never fail the call. Deliberately scoped to
+      // exactly the block that created `audio` (Fix 2's transcript!==false
+      // gate) -- an unconditional end-of-function cleanup would also mop up
+      // after a REGRESSION that extracted audio unconditionally, silently
+      // hiding exactly the file-existence check Fix 2's own tests rely on.
+      try { rmSync(audio, { force: true }); } catch { /* best-effort */ }
     }
   }
 
