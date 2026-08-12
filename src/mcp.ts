@@ -68,10 +68,10 @@ export function buildServer(): McpServer {
         end: z.number().optional().describe('End second of the section to fetch. Only meaningful with returnVideo: true. Provide with start; either alone is ignored and the whole video is fetched.'),
         comments: z.boolean().optional().default(false).describe('Also fetch comments into the metadata file. Off by default: can be very slow on popular videos.'),
       },
-      // Fix 4(c): both tools write to the user's filesystem (metadata,
-      // media, manifest, transcript, frames) and resolve_video moves a
-      // caller-owned file in one branch -- readOnlyHint:true was false, and
-      // clients make trust decisions on this annotation.
+      // Fix 4(c): both tools write to the user's filesystem -- metadata,
+      // media, manifest, transcript and frame images -- and both delete
+      // their own working files afterwards. readOnlyHint:true was false,
+      // and clients make trust decisions on this annotation.
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {
@@ -119,10 +119,10 @@ export function buildServer(): McpServer {
         transcript: z.boolean().optional().default(true).describe('Produce a transcript. Set false to skip transcription entirely when you only want frames.'),
         language: z.string().optional().describe('Language hint such as "zh", "ja" or "en". Usually inferred from the platform; supply it when the source carries no language metadata or the guess is wrong.'),
       },
-      // Fix 4(c): both tools write to the user's filesystem (metadata,
-      // media, manifest, transcript, frames) and resolve_video moves a
-      // caller-owned file in one branch -- readOnlyHint:true was false, and
-      // clients make trust decisions on this annotation.
+      // Fix 4(c): both tools write to the user's filesystem -- metadata,
+      // media, manifest, transcript and frame images -- and both delete
+      // their own working files afterwards. readOnlyHint:true was false,
+      // and clients make trust decisions on this annotation.
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {

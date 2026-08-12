@@ -129,9 +129,13 @@ export interface Manifest {
     url: string; platform: string; title: string; duration: number;
     resolvedBy: string; status: ResolveStatus; reason?: string;
     /**
-     * Local filesystem path to the normalized working video analyzeVideo
-     * produced (NOT the original download) -- present only on the 'ok'
-     * path. This is what closes the coarse-to-fine loop: get_frame/get_clip
+     * Local filesystem path to the video analyzeVideo actually worked from
+     * -- present only on the 'ok' path. In 'key' mode this is the normalized
+     * re-encode (NOT the original download). In 'even'/'none' mode spec §8's
+     * cheapness rules out re-encoding, so it is the resolver's own output,
+     * or the caller's own file when a local path was passed -- which is also
+     * why that file must never be deleted as cleanup.
+     * This is what closes the coarse-to-fine loop: get_frame/get_clip
      * operate on a local file, and until this field existed, analyzeVideo's
      * own manifest had no such path for them to operate on (only individual
      * per-keyframe image paths). See task-16-report.md Finding 2.
