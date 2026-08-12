@@ -118,18 +118,51 @@ const RESOLVE_DESCRIPTION =
   + 'off by default and can be slow to fetch on popular videos; when enabled they are '
   + 'written to the metadata file, never returned inline.';
 
-// Task 6 extends this pattern (progress mapping + the eventual cancellation
-// hook), so it stays a named function rather than being inlined.
-type Store = InMemoryTaskStore;
+// Task 6: honest cancellation (spec §8/§13, task-1-report.md's fact (c)).
+// Queued-cancel is enforced here -- immediately before an item's real work
+// begins, inside the pool-wrapped fn -- because that is the one place
+// execution can still be intercepted before onItemStart marks the task
+// non-cancellable (see HonestCancelStore below). checkCancelled consults
+// the task's OWN status through the same extra.taskStore wrapper the rest
+// of the handler uses; a 'cancelled' status can only mean tasks/cancel
+// already succeeded (HonestCancelStore only lets that happen before
+// onItemStart has fired for this task), so throwing here can never race a
+// legitimately-running item.
+class TaskCancelledError extends Error {
+  constructor() { super('task was cancelled before this item started'); this.name = 'TaskCancelledError'; }
+}
+
+/** Spec §8: cancellation is honest or absent. Queued tasks cancel fully;
+ *  a task whose work has started refuses -- a task that reports cancelled
+ *  while quietly finishing its download is exactly the dishonesty class
+ *  this project exists to kill. */
+class HonestCancelStore extends InMemoryTaskStore {
+  readonly executing = new Set<string>();
+  override async updateTaskStatus(
+    taskId: string, status: Parameters<InMemoryTaskStore['updateTaskStatus']>[1],
+    statusMessage?: string, sessionId?: string,
+  ): Promise<void> {
+    if (status === 'cancelled' && this.executing.has(taskId)) {
+      throw new Error("this task's work has already started and cannot be cancelled; it will finish and deliver its result");
+    }
+    return super.updateTaskStatus(taskId, status, statusMessage, sessionId);
+  }
+}
+
+type Store = HonestCancelStore;
 const label = (i: number, n: number, msg: string) => (n === 1 ? msg : `video ${i + 1}/${n}: ${msg}`);
 
 function runAnalyzeExecution(
   args: AnalyzeToolArgs, pool: SlotPool,
   onUpdate?: (message: string) => void, onItemStart?: (itemIndex: number) => void,
+  checkCancelled?: () => Promise<boolean>,
 ): Promise<import('./agent/analyzeTool.js').AnalyzeToolResult> {
   const n = args.videos.length;
   return analyzeVideoTool(args, {
-    run: (fn, onQueued) => pool.run(fn, onQueued),
+    run: (fn, onQueued) => pool.run(async () => {
+      if (await checkCancelled?.()) throw new TaskCancelledError();
+      return fn();
+    }, onQueued),
     onStage: (i, s) => onUpdate?.(label(i, n, s)),
     onQueued: (i, ahead) => onUpdate?.(label(i, n, `queued, ${ahead} ahead`)),
     onItemStart,
@@ -157,10 +190,24 @@ function runAnalyzeExecution(
  */
 export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
   const pool = opts?.analyzeSlots ?? createSlotPool(analyzeConcurrencyFromEnv());
-  const store: Store = new InMemoryTaskStore();
+  const store: Store = new HonestCancelStore();
   const server = new McpServer(
     { name: 'norma-video', version: '0.2.0' },
-    { taskStore: store, instructions: SERVER_INSTRUCTIONS },
+    {
+      taskStore: store,
+      instructions: SERVER_INSTRUCTIONS,
+      // Task 6 gap-fix, found via advisor review against task-1-report.md's
+      // spike deviation #1: capabilities are never inferred from taskStore
+      // or from registerToolTask -- without this explicit declaration the
+      // client's isToolTask() stays permanently false and
+      // callToolStream()/cancelTask() silently collapse onto the plain
+      // automatic-polling fallback (fact (a)), never reaching the real
+      // task-augmented path cancellation depends on. Task 5 never surfaced
+      // this because tests/mcp.test.ts only makes plain calls, which fact
+      // (a) confirms need no capability declaration at all. Shape taken
+      // directly from tests/taskSpike.test.ts's own working server.
+      capabilities: { tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } } },
+    },
   );
 
   server.experimental.tasks.registerToolTask(
@@ -184,15 +231,37 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
         const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
         void (async () => {
           try {
-            const r = await runAnalyzeExecution(args as AnalyzeToolArgs, pool,
-              (m) => void extra.taskStore.updateTaskStatus(task.taskId, 'working', m).catch(() => {}));
-            await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+            const r = await runAnalyzeExecution(
+              args as AnalyzeToolArgs, pool,
+              (m) => void extra.taskStore.updateTaskStatus(task.taskId, 'working', m).catch(() => {}),
+              () => { store.executing.add(task.taskId); },
+              async () => (await extra.taskStore.getTask(task.taskId))?.status === 'cancelled',
+            );
+            try {
+              await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+            } catch {
+              // Task 1's fact (c)-4: a cancel can race a just-finished
+              // executor in the narrow gap between the queued-cancel check
+              // passing and onItemStart actually marking the task
+              // executing -- the store's own terminal-state guard then
+              // refuses this write. That is a successful cancellation
+              // completing honestly, not wrapper breakage: swallow it here
+              // rather than falling into the 'failed' branch below, which
+              // would also be refused by the same guard and would
+              // misreport an honestly-cancelled task as failed instead.
+            }
           } catch (e) {
+            // Queued-cancel: the pre-item check above threw because the
+            // store already holds 'cancelled' -- that state is durable and
+            // complete on its own; there is nothing further to store.
+            if (e instanceof TaskCancelledError) return;
             // Spec §8: task-failed is reserved for the wrapper itself breaking.
             await extra.taskStore.storeTaskResult(task.taskId, 'failed', {
               content: [{ type: 'text', text: `task execution failed: ${e instanceof Error ? e.message : String(e)}` }],
               isError: true,
             }).catch(() => {});
+          } finally {
+            store.executing.delete(task.taskId);
           }
         })();
         return { task };
@@ -221,6 +290,17 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
     {
       // Spec §6: resolve_video loads no models -- it is network and ffmpeg
       // -- so, unlike analyze_video, it never goes near the slot pool.
+      // Task 6 scope note: this handler never adds its taskId to
+      // store.executing, so HonestCancelStore never refuses a cancel here --
+      // a resolve_video task remains cancellable (store-status-only, per
+      // fact (c)-4: nothing stops the in-flight download itself) for its
+      // entire run, identical to Task 5's pre-Task-6 behavior. RESOLVE_
+      // DESCRIPTION makes no cancellation claim, so nothing here is
+      // dishonest, but it does mean a mid-download cancel can still report
+      // 'cancelled' while the download quietly finishes -- flagged in
+      // task-6-report.md as a follow-up candidate, not fixed here since the
+      // brief's mandate (and every Step-1 test) scopes honest cancellation
+      // to analyze_video's pool-driven executor.
       createTask: async (args, extra) => {
         const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
         void (async () => {
