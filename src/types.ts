@@ -11,7 +11,11 @@ export interface Chapter { start: number; end: number; title: string; }
 export interface VideoMetadata {
   title: string;
   creator: string | null;
-  duration: number;
+  /** Null, not 0, when the platform genuinely omits it (live streams,
+   *  premieres, some non-YouTube extractors) -- matching the `| null`
+   *  convention its neighbouring fields already use, so "unknown" and
+   *  "measured zero" stay distinguishable downstream (resolveTool.ts). */
+  duration: number | null;
   chapters: Chapter[];
   description: string | null;
   uploadDate: string | null;

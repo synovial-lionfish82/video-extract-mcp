@@ -340,4 +340,43 @@ describe('resolveVideoTool', () => {
     const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
     expect(r.duration).toBe(42);
   });
+
+  it('omits duration when yt-dlp metadata itself has no duration -- a live stream or premiere (Fix B)', async () => {
+    // Distinct from "omits duration when the resolver has no metadata layer"
+    // above: here r.metadata IS present (a genuine yt-dlp source), but its
+    // OWN duration is null -- exactly what toVideoMetadata now reports when
+    // meta.duration itself is absent (src/resolve/ytdlp.ts). The pre-fix
+    // guard (`r.metadata?.duration !== undefined`) is TRUE for null, so it
+    // would have let this through, and the `?? r.duration` fallback below
+    // would then have coalesced the null right back into resolve()'s own
+    // required-by-type duration placeholder (0 in this fixture) --
+    // laundering "unknown" into a fake zero. Assert ABSENCE, not falsiness:
+    // toBe(0) and toBeFalsy() both pass against the unfixed code.
+    resolveMock.mockResolvedValue(ok({
+      metadata: {
+        title: 'T', creator: 'C', duration: null,
+        chapters: [], description: null, uploadDate: null, viewCount: null, commentCount: null,
+      },
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
+    expect('duration' in r).toBe(false);
+  });
+
+  it('falls through a null metadata.duration to the real probed duration when returnVideo is true (Fix B)', async () => {
+    // The OTHER side of the `r.metadata?.duration ?? r.duration` fallback:
+    // durationKnown is true here via the returnVideo arm (not the metadata
+    // arm, since metadata.duration is null), so null must not survive
+    // through `??` and mask the real probed value that DID come back.
+    resolveMock.mockResolvedValue(ok({
+      metadata: {
+        title: 'T', creator: 'C', duration: null,
+        chapters: [], description: null, uploadDate: null, viewCount: null, commentCount: null,
+      },
+      duration: 42,
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
+    expect(r.duration).toBe(42);
+  });
 });

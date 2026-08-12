@@ -112,9 +112,18 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   // r.metadata.duration is genuine even without downloading (verified
   // against the installed yt-dlp's own extractor source: duration is
   // scraped during extraction, independent of the download step), so it
-  // is trusted whenever present; r.duration itself is only trusted when a
-  // real file was actually fetched and probed (returnVideo true).
-  const durationKnown = r.metadata?.duration !== undefined || returnVideo;
+  // is trusted whenever present AND a real number; r.duration itself is
+  // only trusted when a real file was actually fetched and probed
+  // (returnVideo true).
+  //
+  // `typeof ... === 'number'`, NOT `!== undefined` (Fix B, task-8):
+  // toVideoMetadata now reports a genuinely duration-less yt-dlp source
+  // (live stream, premiere, some non-YouTube extractors) as
+  // metadata.duration: null, not 0 -- but `null !== undefined` is TRUE, so
+  // the old guard treated a known-absent duration as known, and the spread
+  // below would have coalesced that null right back into r.duration's own
+  // placeholder, laundering "unknown" into a fake zero under a new type.
+  const durationKnown = typeof r.metadata?.duration === 'number' || returnVideo;
   return {
     status: 'ok',
     platform: r.platform,

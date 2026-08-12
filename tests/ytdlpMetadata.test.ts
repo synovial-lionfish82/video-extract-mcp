@@ -43,4 +43,14 @@ describe('toVideoMetadata', () => {
   it('leaves comments undefined when absent', () => {
     expect(toVideoMetadata({}).comments).toBeUndefined();
   });
+  it('reports duration as null, not zero, when the source omits it (Fix B: live streams/premieres)', () => {
+    // `meta.duration ?? 0` used to coerce this to a fake zero-length video;
+    // null lets resolveTool.ts's durationKnown guard genuinely distinguish
+    // "no measurement" from "measured zero". toBeNull(), not toBeFalsy() --
+    // 0 is also falsy, and that is exactly the value this test must reject.
+    expect(toVideoMetadata({}).duration).toBeNull();
+  });
+  it('still carries a real duration through unchanged', () => {
+    expect(toVideoMetadata({ duration: 100 }).duration).toBe(100);
+  });
 });

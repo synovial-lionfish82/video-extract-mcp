@@ -113,7 +113,11 @@ export function toVideoMetadata(meta: YtDlpMeta): VideoMetadata {
   const result: VideoMetadata = {
     title: meta.title ?? '',
     creator: meta.uploader ?? meta.channel ?? null,
-    duration: meta.duration ?? 0,
+    // null, not 0: a duration-less source (live stream, premiere, some
+    // non-YouTube extractors) must stay distinguishable from a genuine
+    // zero-length measurement (Fix B, task-8) -- resolveTool.ts's
+    // durationKnown guard depends on this.
+    duration: meta.duration ?? null,
     chapters: raw.map((c) => ({
       start: c.start_time ?? 0,
       end: c.end_time ?? 0,
