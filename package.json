@@ -12,7 +12,7 @@
     "build": "tsc",
     "typecheck": "npm run build && tsc --noEmit -p tsconfig.typecheck.json",
     "preflight": "tsx scripts/preflight.ts",
-    "cli": "tsx src/cli.ts",
+    "cli": "npm run build && node dist/cli.js",
     "matrix": "tsx scripts/matrix.ts"
   },
   "keywords": [

@@ -62,6 +62,47 @@ Or add it to any MCP client's config directly:
 }
 ```
 
+## Three ways to use it
+
+The MCP server is the main surface, but the same engine is available two other ways.
+
+**As a CLI**, which is the quickest way to see what it does before wiring up an agent:
+
+```bash
+npm run cli -- "https://youtube.com/watch?v=..." --max-frames 10 --out ./output
+
+# just the transcript, no frames
+npm run cli -- "<url>" --frames none --out ./output
+
+# one exact frame at 7s, as cheap as this gets
+npm run cli -- "<url>" --start 7 --end 7 --frames even --max-frames 1 --no-transcript --out ./output
+```
+
+It writes `manifest.json` plus the frame images into `--out`, and also prints the manifest to stdout.
+
+If you want to pipe that JSON somewhere, call the built entry point directly — `npm run` prefixes its own banner lines to stdout, so `npm run cli` output is not valid JSON on its own:
+
+```bash
+npm run build
+node dist/cli.js "<url>" --max-frames 10 | jq '.transcript.source'
+```
+
+**As a library**, if you want the pipeline without an agent in the loop:
+
+```ts
+import { analyzeVideo } from 'video-extract-mcp/dist/analyze.js';
+
+const manifest = await analyzeVideo('https://youtube.com/watch?v=...', {
+  start: 30, end: 90, frames: 'key', maxFrames: 12, outDir: './output',
+});
+console.log(manifest.transcript?.source);   // 'manual' | 'auto' | 'asr'
+console.log(manifest.frames.map((f) => f.image));
+```
+
+`analyzeVideo` never throws for expected failures — a DRM page or a dead link comes back as a manifest whose `source.status` is not `'ok'`, carrying a readable reason. Check `processing.warnings` too: any optional stage that failed and was skipped past records an entry there.
+
+Note that both the CLI and library paths run the **compiled** output. The speech and vision models run in separate worker processes resolved next to the compiled module, so running the TypeScript sources directly leaves those workers unresolvable — they degrade to a warning rather than an error, which is quiet enough to miss. `npm run cli` builds first for this reason.
+
 ## The two tools
 
 The surface is deliberately small. Earlier versions had four tools and the descriptions had to shout about which ones took URLs versus local paths — a sign the design was wrong, not that the warning needed to be louder.

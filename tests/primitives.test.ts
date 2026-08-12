@@ -21,6 +21,23 @@ describe('parseArgs', () => {
     expect(typeof opts.maxFrames).toBe('number');
   });
 
+  it('accepts each --frames mode, the only way the CLI can reach "even"', () => {
+    // resolveFrameMode only returns 'even' for an explicit frames value, so
+    // without this flag uniform sampling and the single-frame recipe are
+    // unreachable from the command line no matter what --max-frames says.
+    expect(parseArgs(['u', '--frames', 'key']).opts.frames).toBe('key');
+    expect(parseArgs(['u', '--frames', 'even']).opts.frames).toBe('even');
+    expect(parseArgs(['u', '--frames', 'none']).opts.frames).toBe('none');
+    expect(parseArgs(['u']).opts.frames).toBeUndefined();
+  });
+
+  it('rejects an invalid --frames value loudly instead of silently using "key"', () => {
+    // A cast would let `--frames evne` through and analyze in the default
+    // mode, so the caller gets a plausible-looking manifest for a request
+    // that was never honoured.
+    expect(() => parseArgs(['u', '--frames', 'evne'])).toThrow(/must be key, even or none/);
+  });
+
   it('routes --lang and --out to distinct fields (catches a same-type field swap)', () => {
     // --start/--end/--max-frames could swap and still both be numbers, but a
     // --lang/--out swap between two STRING fields is exactly the case a weak

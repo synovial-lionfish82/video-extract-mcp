@@ -8,6 +8,9 @@ export async function transcribeAudio(
   wav: string, opts: { engine?: AsrEngine; modelsDir?: string; preferredLanguage?: string } = {},
 ): Promise<Transcript> {
   const here = dirname(fileURLToPath(import.meta.url));
+  // Compiled-output only -- see the same note in src/vision/embed.ts. Under
+  // tsx the sibling is asrWorker.ts and this misses, which surfaces as an
+  // "asr failed" warning rather than an error.
   const worker = join(here, 'asrWorker.js');
   const engine = opts.engine ?? 'whisper';
   const modelsDir = opts.modelsDir ?? 'models';

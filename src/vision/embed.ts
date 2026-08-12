@@ -9,6 +9,14 @@ export async function embedImages(paths: string[]): Promise<number[][]> {
   // worker (tests/embed.test.ts asserts spawn() is never called for this case).
   if (paths.length === 0) return [];
   const here = dirname(fileURLToPath(import.meta.url));
+  // Resolved relative to the RUNNING module, so this only exists once the
+  // project is compiled: from dist/ the sibling is embedWorker.js, but from
+  // src/ under tsx the sibling is embedWorker.ts and this lookup misses.
+  // Any entry point must therefore run the compiled output -- `npm run cli`
+  // builds first for exactly this reason. Getting it wrong is quiet rather
+  // than loud: the spawn fails MODULE_NOT_FOUND, the stage degrades, and the
+  // only trace is a processing.warnings entry, so the run still "succeeds"
+  // with every embedding missing.
   const worker = join(here, 'embedWorker.js');
   const dir = mkdtempSync(join(tmpdir(), 'norma-embed-'));
   try {

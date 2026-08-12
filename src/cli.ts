@@ -18,6 +18,21 @@ export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions }
     if (a === '--start') { const v = next(); if (v !== undefined) opts.start = Number(v); }
     else if (a === '--end') { const v = next(); if (v !== undefined) opts.end = Number(v); }
     else if (a === '--max-frames') { const v = next(); if (v !== undefined) opts.maxFrames = Number(v); }
+    // Without this the CLI could never reach 'even': resolveFrameMode only
+    // returns it for an explicit frames value, so a CLI limited to
+    // --max-frames can produce 'key' (a budget) or 'none' (a zero budget)
+    // and nothing else -- leaving uniform sampling and the single-frame
+    // recipe unreachable from the command line. Validated rather than cast,
+    // so a typo fails loudly instead of silently analyzing in 'key' mode.
+    else if (a === '--frames') {
+      const v = next();
+      if (v !== undefined) {
+        if (v !== 'key' && v !== 'even' && v !== 'none') {
+          throw new Error(`--frames must be key, even or none (got ${JSON.stringify(v)})`);
+        }
+        opts.frames = v;
+      }
+    }
     else if (a === '--lang') { const v = next(); if (v !== undefined) opts.preferredLanguage = v; }
     else if (a === '--out') { const v = next(); if (v !== undefined) opts.outDir = v; }
     else if (a === '--no-transcript') opts.transcript = false;
@@ -28,7 +43,14 @@ export function parseArgs(argv: string[]): { url: string; opts: AnalyzeOptions }
 async function main(): Promise<void> {
   const { url, opts } = parseArgs(process.argv.slice(2));
   if (!url) {
-    console.error('usage: norma <url> [--start S --end E] [--max-frames N] [--lang zh] [--no-transcript] [--out DIR]');
+    console.error(
+      'usage: video-extract <url|path> [--start S --end E] [--frames key|even|none]\n'
+      + '                     [--max-frames N] [--lang zh] [--no-transcript] [--out DIR]\n\n'
+      + '  --frames key   (default) the most informative frames, deduplicated\n'
+      + '  --frames even  uniform sampling across the range; --max-frames sets density\n'
+      + '  --frames none  no frames at all (transcript only)\n\n'
+      + '  one exact frame:  --start 7 --end 7 --frames even --max-frames 1 --no-transcript',
+    );
     process.exit(1);
   }
   const manifest = await analyzeVideo(url, opts);
