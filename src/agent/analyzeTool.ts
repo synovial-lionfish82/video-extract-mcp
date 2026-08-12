@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync, renameSync, copyFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { FrameMode, Manifest, Transcript } from '../types.js';
+import type { AnalyzeStage, FrameMode, Manifest, Transcript } from '../types.js';
 import { analyzeVideo } from '../analyze.js';
 import { buildManifest } from '../manifest.js';
 import { writeManifest, writeTranscript } from './artifacts.js';
@@ -9,7 +9,7 @@ import { writeManifest, writeTranscript } from './artifacts.js';
  *  exactly the payload destinationPath exists to keep out of context. */
 export const INLINE_TRANSCRIPT_MAX_CHARS = 8000;
 
-export interface AnalyzeToolResult {
+export interface AnalyzeItemResult {
   status: string;
   reason?: string;
   title: string;
@@ -23,9 +23,8 @@ export interface AnalyzeToolResult {
   warnings: string[];
 }
 
-export interface AnalyzeToolArgs {
+export interface AnalyzeVideoItem {
   pathOrUrl: string;
-  destinationPath: string;
   start?: number;
   end?: number;
   frames?: FrameMode;
@@ -74,7 +73,7 @@ function relocateFrame(destinationPath: string, imagePath: string): string {
  * its manifest's source.filePath points at the re-encoded copy it made
  * there (work.mp4) -- never cleaned up, so every local analyze_video call
  * left a full re-encode behind (deferred #18). The rewrite below always
- * replaces that path with args.pathOrUrl for a local source, so once it has
+ * replaces that path with item.pathOrUrl for a local source, so once it has
  * happened, nothing in the final reply or manifest (`m`) references the
  * pre-rewrite path any more -- it is an orphaned temp, not a second copy of
  * anything the agent still needs.
@@ -84,7 +83,7 @@ function relocateFrame(destinationPath: string, imagePath: string): string {
  * what the reply's videoPath and the manifest's source.filePath actually
  * reference" before deleting anything. When frameMode isn't 'key', or no
  * range was applied, analyzeVideo's own filePath is often ALREADY
- * args.pathOrUrl (resolve()'s bare-local-path branch returns the caller's
+ * item.pathOrUrl (resolve()'s bare-local-path branch returns the caller's
  * path back unchanged) -- rawFilePath === finalFilePath in that case, so
  * this is a no-op, and the caller's own file is never touched. Only a
  * genuinely different, analyzeVideo-created path is ever removed.
@@ -95,8 +94,10 @@ function cleanupOrphanedCopy(rawFilePath: string | undefined, finalFilePath: str
   try { rmSync(rawFilePath, { force: true }); } catch { /* best-effort */ }
 }
 
-async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeToolResult> {
-  mkdirSync(args.destinationPath, { recursive: true });
+async function analyzeOneVideoAttempt(
+  item: AnalyzeVideoItem, destinationPath: string, onStage?: (stage: AnalyzeStage) => void,
+): Promise<AnalyzeItemResult> {
+  mkdirSync(destinationPath, { recursive: true });
 
   // Spec §2.1: a source already on disk must not be duplicated into
   // destinationPath. analyzeVideo's normalize() step unconditionally writes
@@ -110,18 +111,19 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
   // outDir is left unset -- analyzeVideo falls back to its own private
   // mkdtempSync'd directory (src/analyze.ts) -- and only the (cheap) frame
   // thumbnails are relocated into destinationPath below.
-  const local = isLocalPath(args.pathOrUrl);
+  const local = isLocalPath(item.pathOrUrl);
 
-  const raw = await analyzeVideo(args.pathOrUrl, {
-    start: args.start,
-    end: args.end,
-    frames: args.frames,
-    maxFrames: args.maxFrames,
-    transcript: args.transcript,
+  const raw = await analyzeVideo(item.pathOrUrl, {
+    start: item.start,
+    end: item.end,
+    frames: item.frames,
+    maxFrames: item.maxFrames,
+    transcript: item.transcript,
     // Spec §4: an explicit language is the override; it outranks metadata.
-    preferredLanguage: args.language,
-    destinationPath: args.destinationPath,
-    ...(local ? {} : { outDir: args.destinationPath }),
+    preferredLanguage: item.language,
+    destinationPath,
+    onStage,
+    ...(local ? {} : { outDir: destinationPath }),
   });
 
   // Spec §2.1: for a local source, relocate the frame thumbnails into
@@ -133,8 +135,8 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
   const m: Manifest = local
     ? {
         ...raw,
-        source: raw.source.filePath ? { ...raw.source, filePath: args.pathOrUrl } : raw.source,
-        frames: raw.frames.map((f) => ({ ...f, image: relocateFrame(args.destinationPath, f.image) })),
+        source: raw.source.filePath ? { ...raw.source, filePath: item.pathOrUrl } : raw.source,
+        frames: raw.frames.map((f) => ({ ...f, image: relocateFrame(destinationPath, f.image) })),
       }
     : raw;
 
@@ -144,14 +146,14 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
   // what keeps it from ever touching a file the reply still points at.
   cleanupOrphanedCopy(raw.source.filePath, m.source.filePath);
 
-  const manifestPath = writeManifest(args.destinationPath, m);
+  const manifestPath = writeManifest(destinationPath, m);
 
   // Spec §3: the transcript is ALWAYS written, and additionally returned
   // inline only when short enough to be worth the context.
   let transcriptPath: string | undefined;
   let inline: Transcript | undefined;
   if (m.transcript) {
-    transcriptPath = writeTranscript(args.destinationPath, m.transcript);
+    transcriptPath = writeTranscript(destinationPath, m.transcript);
     if (transcriptChars(m.transcript) <= INLINE_TRANSCRIPT_MAX_CHARS) inline = m.transcript;
   }
 
@@ -171,9 +173,9 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
 }
 
 /**
- * Documented contract (matching resolveVideoTool/analyzeVideo's own shape):
+ * Documented contract (matching resolveOneVideo/analyzeVideo's own shape):
  * analyze_video RETURNS a structured result rather than throwing.
- * analyzeVideoToolAttempt can throw for reasons that have nothing to do
+ * analyzeOneVideoAttempt can throw for reasons that have nothing to do
  * with the URL or the pipeline -- mkdirSync EEXIST when destinationPath
  * already exists as a file (an ordinary caller mistake, not adversarial
  * input), or any other unexpected error analyzeVideo itself did not already
@@ -181,15 +183,17 @@ async function analyzeVideoToolAttempt(args: AnalyzeToolArgs): Promise<AnalyzeTo
  * becomes an honest 'extractor_failed' result here instead of an uncaught
  * rejection.
  */
-export async function analyzeVideoTool(args: AnalyzeToolArgs): Promise<AnalyzeToolResult> {
+export async function analyzeOneVideo(
+  item: AnalyzeVideoItem, destinationPath: string, onStage?: (stage: AnalyzeStage) => void,
+): Promise<AnalyzeItemResult> {
   try {
-    return await analyzeVideoToolAttempt(args);
+    return await analyzeOneVideoAttempt(item, destinationPath, onStage);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    let manifestPath = join(args.destinationPath, 'manifest.json');
+    let manifestPath = join(destinationPath, 'manifest.json');
     try {
-      manifestPath = writeManifest(args.destinationPath, buildManifest({
-        url: args.pathOrUrl, platform: 'unknown', title: '', duration: 0, resolvedBy: 'none',
+      manifestPath = writeManifest(destinationPath, buildManifest({
+        url: item.pathOrUrl, platform: 'unknown', title: '', duration: 0, resolvedBy: 'none',
         status: 'extractor_failed', reason: `analyze_video failed: ${message}`,
         transcript: null, frames: [], candidateCount: 0, peakRssMb: 0, frameMode: 'none', warnings: [],
       }));
@@ -206,4 +210,37 @@ export async function analyzeVideoTool(args: AnalyzeToolArgs): Promise<AnalyzeTo
       manifestPath, warnings: [],
     };
   }
+}
+
+export interface AnalyzeToolArgs { destinationPath: string; videos: AnalyzeVideoItem[]; }
+export interface AnalyzeToolResult { videos: AnalyzeItemResult[]; }
+export interface AnalyzeRunHooks {
+  /** Wraps each item's execution -- the MCP layer passes the slot pool here.
+   *  Omitted = run directly (library callers manage their own concurrency). */
+  run?: <T>(fn: () => Promise<T>, onQueued: (ahead: number) => void) => Promise<T>;
+  onStage?: (itemIndex: number, stage: AnalyzeStage) => void;
+  onQueued?: (itemIndex: number, ahead: number) => void;
+  /** Fires when the item actually starts executing (post-queue). Task 6 uses
+   *  it to mark the task running for honest-cancellation purposes. */
+  onItemStart?: (itemIndex: number) => void;
+}
+
+/** Spec §4: one video writes flat (today's layout, byte-identical); several
+ *  each get destinationPath/video-N so metadata.json never collides. */
+export function itemDir(destinationPath: string, index: number, total: number): string {
+  return total === 1 ? destinationPath : join(destinationPath, `video-${index + 1}`);
+}
+
+export async function analyzeVideoTool(
+  args: AnalyzeToolArgs, hooks?: AnalyzeRunHooks,
+): Promise<AnalyzeToolResult> {
+  const n = args.videos.length;
+  const exec = hooks?.run ?? (<T,>(fn: () => Promise<T>) => fn());
+  const videos = await Promise.all(args.videos.map((item, i) =>
+    exec(
+      () => { hooks?.onItemStart?.(i); return analyzeOneVideo(item, itemDir(args.destinationPath, i, n), (s) => hooks?.onStage?.(i, s)); },
+      (ahead) => hooks?.onQueued?.(i, ahead),
+    ),
+  ));
+  return { videos };
 }

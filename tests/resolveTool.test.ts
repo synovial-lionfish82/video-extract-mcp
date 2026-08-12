@@ -60,9 +60,9 @@ describe('resolveVideoTool', () => {
     // or that defaults args.returnVideo to true.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
     expect(resolveMock.mock.calls[0]![1]).toMatchObject({ returnVideo: false });
-    expect(r.videoPath).toBeUndefined();
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('copies rather than moves when the source is the caller\'s own file, not a working-directory temp (Fix 1: data-loss regression)', async () => {
@@ -79,10 +79,10 @@ describe('resolveVideoTool', () => {
     const before = readFileSync(source);
     resolveMock.mockResolvedValue(ok({ filePath: source, platform: 'local', resolvedBy: 'direct' }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: source, destinationPath: dir, returnVideo: true });
-    expect(r.status).toBe('ok');
-    expect(r.videoPath).toBeDefined();
-    expect(existsSync(r.videoPath!)).toBe(true);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: source, returnVideo: true }] });
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[0]!.videoPath).toBeDefined();
+    expect(existsSync(r.videos[0]!.videoPath!)).toBe(true);
     // The regression: the source must survive at its own path, untouched --
     // not just "some file exists there", but the SAME bytes, non-empty.
     expect(existsSync(source)).toBe(true);
@@ -94,36 +94,36 @@ describe('resolveVideoTool', () => {
     // Mutation 2 (direction A): nextSteps missing when the media WAS withheld.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.nextSteps).toMatch(/returnVideo/);
-    expect(r.nextSteps).toMatch(/analyze_video/);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.nextSteps).toMatch(/returnVideo/);
+    expect(r.videos[0]!.nextSteps).toMatch(/analyze_video/);
   });
 
   it('omits next-steps guidance once the media has been fetched', async () => {
     // Mutation 2 (direction B): nextSteps appearing even though the media WAS fetched.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
-    expect(r.nextSteps).toBeUndefined();
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true }] });
+    expect(r.videos[0]!.nextSteps).toBeUndefined();
   });
 
   it('surfaces title, creator, duration and chapters inline', async () => {
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.title).toBe('T');
-    expect(r.creator).toBe('C');
-    expect(r.duration).toBe(100);
-    expect(r.chapters).toEqual([{ start: 0, end: 12, title: 'Intro' }]);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.title).toBe('T');
+    expect(r.videos[0]!.creator).toBe('C');
+    expect(r.videos[0]!.duration).toBe(100);
+    expect(r.videos[0]!.chapters).toEqual([{ start: 0, end: 12, title: 'Intro' }]);
   });
 
   it('sends only a preview inline and the full description to the file', async () => {
     // Mutation 3: the full description leaking into the inline reply.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.descriptionPreview!.length).toBeLessThanOrEqual(126);
-    const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.descriptionPreview!.length).toBeLessThanOrEqual(126);
+    const saved = JSON.parse(readFileSync(r.videos[0]!.metadataPath, 'utf8'));
     expect(saved.description).toHaveLength(400);
   });
 
@@ -149,11 +149,11 @@ describe('resolveVideoTool', () => {
       },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, comments: true });
-    expect(r.commentCount).toBe(3);
-    expect(JSON.stringify(r)).not.toContain('nice video');
-    expect(JSON.stringify(r)).not.toContain('"comments"');
-    const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', comments: true }] });
+    expect(r.videos[0]!.commentCount).toBe(3);
+    expect(JSON.stringify(r.videos[0])).not.toContain('nice video');
+    expect(JSON.stringify(r.videos[0])).not.toContain('"comments"');
+    const saved = JSON.parse(readFileSync(r.videos[0]!.metadataPath, 'utf8'));
     expect(saved.comments).toEqual(richComments);
   });
 
@@ -171,13 +171,13 @@ describe('resolveVideoTool', () => {
     resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 724, clipEnd: 1200 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 724, end: 1200,
+      destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true, start: 724, end: 1200 }],
     });
-    expect(r.note).toMatch(/starts at 0|begins at zero/i);
-    expect(r.note).toContain('724');
-    expect(r.videoPath).toBeDefined();
-    expect(existsSync(r.videoPath!)).toBe(true);
-    expect(basename(r.videoPath!)).toBe('source_s724_e1200.mp4');
+    expect(r.videos[0]!.note).toMatch(/starts at 0|begins at zero/i);
+    expect(r.videos[0]!.note).toContain('724');
+    expect(r.videos[0]!.videoPath).toBeDefined();
+    expect(existsSync(r.videos[0]!.videoPath!)).toBe(true);
+    expect(basename(r.videos[0]!.videoPath!)).toBe('source_s724_e1200.mp4');
   });
 
   it('keys the clip fields, filename and note off the range genuinely applied, never the range requested (spec §5.1)', async () => {
@@ -199,14 +199,14 @@ describe('resolveVideoTool', () => {
     resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 700, clipEnd: 1150 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 724, end: 1200,
+      destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true, start: 724, end: 1200 }],
     });
-    expect(r.clipStart).toBe(700);
-    expect(r.clipEnd).toBe(1150);
-    expect(r.note).toContain('700');
-    expect(r.note).not.toContain('724');
-    expect(r.videoPath).toBeDefined();
-    expect(basename(r.videoPath!)).toBe('source_s700_e1150.mp4');
+    expect(r.videos[0]!.clipStart).toBe(700);
+    expect(r.videos[0]!.clipEnd).toBe(1150);
+    expect(r.videos[0]!.note).toContain('700');
+    expect(r.videos[0]!.note).not.toContain('724');
+    expect(r.videos[0]!.videoPath).toBeDefined();
+    expect(basename(r.videos[0]!.videoPath!)).toBe('source_s700_e1150.mp4');
   });
 
   it('reports the clip duration, not the original video duration, when a range was applied (Fix 5, clipped shape)', async () => {
@@ -220,12 +220,12 @@ describe('resolveVideoTool', () => {
     resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 1, clipEnd: 4 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 1, end: 4,
+      destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true, start: 1, end: 4 }],
     });
-    expect(r.status).toBe('ok');
-    expect(r.clipStart).toBe(1);
-    expect(r.clipEnd).toBe(4);
-    expect(r.duration).toBe(3);
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[0]!.clipStart).toBe(1);
+    expect(r.videos[0]!.clipEnd).toBe(4);
+    expect(r.videos[0]!.duration).toBe(3);
   });
 
   it('still reports the original video duration when returnVideo is true but no range was requested (Fix 5, unclipped shape)', async () => {
@@ -235,9 +235,9 @@ describe('resolveVideoTool', () => {
     // before.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
-    expect(r.clipStart).toBeUndefined();
-    expect(r.duration).toBe(100);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true }] });
+    expect(r.videos[0]!.clipStart).toBeUndefined();
+    expect(r.videos[0]!.duration).toBe(100);
   });
 
   it('omits the clip-offset note and clip fields when returnVideo is false, even if a range is requested', async () => {
@@ -249,12 +249,12 @@ describe('resolveVideoTool', () => {
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/v', destinationPath: dir, start: 724, end: 1200,
+      destinationPath: dir, videos: [{ url: 'https://x/v', start: 724, end: 1200 }],
     });
-    expect(r.note).toBeUndefined();
-    expect(r.clipStart).toBeUndefined();
-    expect(r.clipEnd).toBeUndefined();
-    expect(r.videoPath).toBeUndefined();
+    expect(r.videos[0]!.note).toBeUndefined();
+    expect(r.videos[0]!.clipStart).toBeUndefined();
+    expect(r.videos[0]!.clipEnd).toBeUndefined();
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('returns a failure shape without throwing', async () => {
@@ -264,10 +264,10 @@ describe('resolveVideoTool', () => {
     // would be actively misleading.
     resolveMock.mockResolvedValue({ status: 'unsupported', reason: 'drm_protected', message: 'DRM-protected media' });
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.status).toBe('unsupported');
-    expect(r.videoPath).toBeUndefined();
-    expect(r.nextSteps).toBeUndefined();
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.status).toBe('unsupported');
+    expect(r.videos[0]!.videoPath).toBeUndefined();
+    expect(r.videos[0]!.nextSteps).toBeUndefined();
   });
 
   it('surfaces the categorical failure reason and records the url alongside it', async () => {
@@ -279,17 +279,17 @@ describe('resolveVideoTool', () => {
     // itself carries no url to correlate the failure record back to it.
     resolveMock.mockResolvedValue({ status: 'unsupported', reason: 'drm_protected', message: 'DRM-protected media' });
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.reason).toBe('drm_protected');
-    const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.reason).toBe('drm_protected');
+    const saved = JSON.parse(readFileSync(r.videos[0]!.metadataPath, 'utf8'));
     expect(saved.url).toBe('https://x/v');
   });
 
   it('writes metadata even on the metadata-only path', async () => {
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(existsSync(r.metadataPath)).toBe(true);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(existsSync(r.videos[0]!.metadataPath)).toBe(true);
   });
 
   it('forwards start/end to resolve() only when fetching, never on a metadata-only call', async () => {
@@ -300,7 +300,7 @@ describe('resolveVideoTool', () => {
     // a metadata-only request.
     resolveMock.mockResolvedValue(ok());
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, start: 30, end: 60 });
+    await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', start: 30, end: 60 }] });
     expect(resolveMock.mock.calls[0]![1].start).toBeUndefined();
     expect(resolveMock.mock.calls[0]![1].end).toBeUndefined();
   });
@@ -318,28 +318,28 @@ describe('resolveVideoTool', () => {
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/direct.mp4', destinationPath: dir, returnVideo: true, start: 1, end: 3,
+      destinationPath: dir, videos: [{ url: 'https://x/direct.mp4', returnVideo: true, start: 1, end: 3 }],
     });
-    expect(r.status).toBe('ok');
-    expect(r.videoPath).toBeDefined();
-    expect(basename(r.videoPath!)).toBe('source_s1_e3.mp4');
-    expect(r.clipStart).toBe(1);
-    expect(r.clipEnd).toBe(3);
-    expect(r.note).toMatch(/starts at 0|begins at zero/i);
-    expect(r.note).toContain('1');
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[0]!.videoPath).toBeDefined();
+    expect(basename(r.videos[0]!.videoPath!)).toBe('source_s1_e3.mp4');
+    expect(r.videos[0]!.clipStart).toBe(1);
+    expect(r.videos[0]!.clipEnd).toBe(3);
+    expect(r.videos[0]!.note).toMatch(/starts at 0|begins at zero/i);
+    expect(r.videos[0]!.note).toContain('1');
     // Not just correctly named -- genuinely shorter: proves ffmpeg actually
     // trimmed the file rather than the full 6s file being renamed under a
     // clip-shaped name.
-    const trimmed = await probe(r.videoPath!);
+    const trimmed = await probe(r.videos[0]!.videoPath!);
     expect(trimmed.duration).toBeLessThan(4);
-    const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
+    const saved = JSON.parse(readFileSync(r.videos[0]!.metadataPath, 'utf8'));
     expect(saved.clipStart).toBe(1);
     expect(saved.clipEnd).toBe(3);
     // Fix 5, the OTHER clipped sub-case (local trim rather than a
     // resolver-native range): the fixture's metadata.duration is 100 (the
     // ok() default), so this also proves the reply's duration comes from
     // the applied range (3-1=2), not the original video's duration.
-    expect(r.duration).toBe(2);
+    expect(r.videos[0]!.duration).toBe(2);
   });
 
   it('surfaces a local trim failure as a structured failure instead of throwing', async () => {
@@ -351,10 +351,10 @@ describe('resolveVideoTool', () => {
     resolveMock.mockResolvedValue(ok({ platform: 'direct', resolvedBy: 'direct', rangeApplied: false }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const r = await resolveVideoTool({
-      url: 'https://x/direct.mp4', destinationPath: dir, returnVideo: true, start: 1, end: 3,
+      destinationPath: dir, videos: [{ url: 'https://x/direct.mp4', returnVideo: true, start: 1, end: 3 }],
     });
-    expect(r.status).not.toBe('ok');
-    expect(r.videoPath).toBeUndefined();
+    expect(r.videos[0]!.status).not.toBe('ok');
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('returns a structured failure instead of throwing when destinationPath exists as a file (EEXIST)', async () => {
@@ -367,10 +367,10 @@ describe('resolveVideoTool', () => {
     const parent = mkdtempSync(join(tmpdir(), 'norma-rt-'));
     const notADir = join(parent, 'blocked');
     writeFileSync(notADir, 'i am a file, not a directory');
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: notADir });
-    expect(r.status).not.toBe('ok');
-    expect(typeof r.metadataPath).toBe('string');
-    expect(r.videoPath).toBeUndefined();
+    const r = await resolveVideoTool({ destinationPath: notADir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.status).not.toBe('ok');
+    expect(typeof r.videos[0]!.metadataPath).toBe('string');
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('omits duration when the resolver has no metadata layer and no media was fetched (design: absent, not zero)', async () => {
@@ -379,9 +379,9 @@ describe('resolveVideoTool', () => {
     // let that reach the agent looking like a real zero-length video.
     resolveMock.mockResolvedValue(ok({ metadata: undefined, duration: 0 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.duration).toBeUndefined();
-    expect(JSON.stringify(r)).not.toContain('"duration"');
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.duration).toBeUndefined();
+    expect(JSON.stringify(r.videos[0])).not.toContain('"duration"');
   });
 
   it('still surfaces duration when the resolver metadata provides it, even though media was not fetched', async () => {
@@ -389,8 +389,8 @@ describe('resolveVideoTool', () => {
     // dict) -- this must not be swept up by the same guard.
     resolveMock.mockResolvedValue(ok()); // default metadata.duration: 100
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect(r.duration).toBe(100);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect(r.videos[0]!.duration).toBe(100);
   });
 
   it('still surfaces duration from a real probe when media WAS fetched, even with no metadata layer', async () => {
@@ -398,8 +398,8 @@ describe('resolveVideoTool', () => {
     // r.duration IS a genuine probed value this time and must come through.
     resolveMock.mockResolvedValue(ok({ metadata: undefined, duration: 42 }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
-    expect(r.duration).toBe(42);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true }] });
+    expect(r.videos[0]!.duration).toBe(42);
   });
 
   it('omits duration when yt-dlp metadata itself has no duration -- a live stream or premiere (Fix B)', async () => {
@@ -420,8 +420,8 @@ describe('resolveVideoTool', () => {
       },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
-    expect('duration' in r).toBe(false);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v' }] });
+    expect('duration' in r.videos[0]!).toBe(false);
   });
 
   it('falls through a null metadata.duration to the real probed duration when returnVideo is true (Fix B)', async () => {
@@ -437,8 +437,8 @@ describe('resolveVideoTool', () => {
       duration: 42,
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
-    expect(r.duration).toBe(42);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/v', returnVideo: true }] });
+    expect(r.videos[0]!.duration).toBe(42);
   });
 
   it('surfaces a locally-probed duration on a metadata-only call for a local source, even though there is no metadata layer (Fix 7)', async () => {
@@ -452,8 +452,8 @@ describe('resolveVideoTool', () => {
       platform: 'local', resolvedBy: 'direct', metadata: undefined, duration: 6,
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: '/some/local/video.mp4', destinationPath: dir });
-    expect(r.duration).toBe(6);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: '/some/local/video.mp4' }] });
+    expect(r.videos[0]!.duration).toBe(6);
   });
 
   it('omits duration for a local file ffprobe could not measure, rather than reporting 0 as a fact', async () => {
@@ -468,9 +468,9 @@ describe('resolveVideoTool', () => {
       platform: 'local', resolvedBy: 'direct', metadata: undefined, duration: 0,
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: '/some/bare/stream.h264', destinationPath: dir });
-    expect(r.status).toBe('ok');
-    expect('duration' in r).toBe(false);
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: '/some/bare/stream.h264' }] });
+    expect(r.videos[0]!.status).toBe('ok');
+    expect('duration' in r.videos[0]!).toBe(false);
   });
 
   it('still omits duration for a real direct-URL source on a metadata-only call (Fix 7 stays scoped to local only)', async () => {
@@ -484,8 +484,37 @@ describe('resolveVideoTool', () => {
       platform: 'direct', resolvedBy: 'direct', metadata: undefined, duration: 0,
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
-    const r = await resolveVideoTool({ url: 'https://x/direct.mp4', destinationPath: dir });
-    expect(r.duration).toBeUndefined();
-    expect(JSON.stringify(r)).not.toContain('"duration"');
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [{ url: 'https://x/direct.mp4' }] });
+    expect(r.videos[0]!.duration).toBeUndefined();
+    expect(JSON.stringify(r.videos[0])).not.toContain('"duration"');
+  });
+});
+
+describe('batching (spec §3-§5)', () => {
+  it('N=2 writes each item into its own subdir -- metadata files do not collide', async () => {
+    resolveMock.mockResolvedValue(ok());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-batch-'));
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [
+      { url: 'https://x.test/a' }, { url: 'https://x.test/b' },
+    ]});
+    expect(r.videos).toHaveLength(2);
+    expect(r.videos[0]!.metadataPath).toBe(join(dir, 'video-1', 'metadata.json'));
+    expect(r.videos[1]!.metadataPath).toBe(join(dir, 'video-2', 'metadata.json'));
+    expect(existsSync(r.videos[0]!.metadataPath)).toBe(true);
+    expect(existsSync(r.videos[1]!.metadataPath)).toBe(true);
+  });
+
+  it('partial failure: item statuses are independent, the call resolves', async () => {
+    // mock resolve(): ok for /a, not_found for /dead
+    resolveMock.mockImplementation(async (url: string) => (
+      url.endsWith('/dead') ? { status: 'not_found', message: 'no such video' } : ok()
+    ));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-batch-pf-'));
+    const r = await resolveVideoTool({ destinationPath: dir, videos: [
+      { url: 'https://x.test/a' }, { url: 'https://x.test/dead' },
+    ]});
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[1]!.status).toBe('not_found');
+    expect(r.videos[1]!.metadataPath).toBe(join(dir, 'video-2', 'metadata.json'));
   });
 });

@@ -76,8 +76,9 @@ export function buildServer(): McpServer {
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {
-      const r = await resolveVideoTool(args);
-      return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      const { destinationPath, ...item } = args;
+      const r = await resolveVideoTool({ destinationPath, videos: [item] });
+      return { content: [{ type: 'text', text: JSON.stringify(r.videos[0]!, null, 2) }] };
     },
   );
 
@@ -133,8 +134,9 @@ export function buildServer(): McpServer {
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => {
-      const r = await analyzeVideoTool(args);
-      return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      const { destinationPath, ...item } = args;
+      const r = await analyzeVideoTool({ destinationPath, videos: [item] });
+      return { content: [{ type: 'text', text: JSON.stringify(r.videos[0]!, null, 2) }] };
     },
   );
 

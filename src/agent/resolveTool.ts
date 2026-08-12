@@ -5,10 +5,11 @@ import type { Chapter } from '../types.js';
 import { resolve } from '../resolve/index.js';
 import { trim } from '../media/ffmpeg.js';
 import { descriptionPreview, mediaFileName, writeMetadata } from './artifacts.js';
+import { itemDir } from './analyzeTool.js';
 
 /**
  * True when `filePath` is located inside `dir`. Fix 1 (data loss): renaming
- * is only safe when the source is a working-directory temp resolveVideoTool
+ * is only safe when the source is a working-directory temp resolveOneVideo
  * itself created or a resolver wrote into the workDir it was given (direct.ts,
  * ytdlp.ts, wechat.ts, and this module's own local-trim output all do). The
  * bare-local-path branch (src/resolve/index.ts:29-37) instead returns the
@@ -23,7 +24,7 @@ function isInside(filePath: string, dir: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
-export interface ResolveToolResult {
+export interface ResolveItemResult {
   status: string;
   reason?: string;
   platform?: string;
@@ -41,26 +42,25 @@ export interface ResolveToolResult {
   note?: string;
 }
 
-export interface ResolveToolArgs {
+export interface ResolveVideoItem {
   url: string;
-  destinationPath: string;
   returnVideo?: boolean;
   start?: number;
   end?: number;
   comments?: boolean;
 }
 
-async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveToolResult> {
-  const returnVideo = args.returnVideo ?? false;
-  mkdirSync(args.destinationPath, { recursive: true });
+async function resolveOneVideoAttempt(item: ResolveVideoItem, destinationPath: string): Promise<ResolveItemResult> {
+  const returnVideo = item.returnVideo ?? false;
+  mkdirSync(destinationPath, { recursive: true });
 
   const workDir = mkdtempSync(join(tmpdir(), 'norma-res-'));
-  const r = await resolve(args.url, {
+  const r = await resolve(item.url, {
     workDir,
     returnVideo,
-    comments: args.comments ?? false,
-    start: returnVideo ? args.start : undefined,
-    end: returnVideo ? args.end : undefined,
+    comments: item.comments ?? false,
+    start: returnVideo ? item.start : undefined,
+    end: returnVideo ? item.end : undefined,
   });
 
   if (r.status !== 'ok') {
@@ -68,7 +68,7 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
     // `url` is included because ResolveFailure itself carries none, and
     // without it a failure record on disk cannot be correlated back to
     // what was being resolved.
-    const metadataPath = writeMetadata(args.destinationPath, { url: args.url, ...r });
+    const metadataPath = writeMetadata(destinationPath, { url: item.url, ...r });
     // Prefer the categorical reason (e.g. 'drm_protected') when the resolver
     // supplied one, falling back to the human-readable message otherwise --
     // the same fold analyze.ts:86 already uses for the same ResolveFailure
@@ -96,16 +96,16 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   let sourcePath = r.filePath;
   let appliedStart = r.clipStart;
   let appliedEnd = r.clipEnd;
-  if (returnVideo && args.start !== undefined && args.end !== undefined && !r.rangeApplied) {
-    sourcePath = await trim(r.filePath, args.start, args.end, join(workDir, 'clip.mp4'));
-    appliedStart = args.start;
-    appliedEnd = args.end;
+  if (returnVideo && item.start !== undefined && item.end !== undefined && !r.rangeApplied) {
+    sourcePath = await trim(r.filePath, item.start, item.end, join(workDir, 'clip.mp4'));
+    appliedStart = item.start;
+    appliedEnd = item.end;
   }
 
   // Spec §5.1: the saved metadata must record the applied range, whether the
   // resolver applied it or the local trim above just did.
-  const metadataPath = writeMetadata(args.destinationPath, {
-    url: args.url, platform: r.platform, resolvedBy: r.resolvedBy,
+  const metadataPath = writeMetadata(destinationPath, {
+    url: item.url, platform: r.platform, resolvedBy: r.resolvedBy,
     clipStart: appliedStart, clipEnd: appliedEnd,
     captions: r.captions, languageHint: r.languageHint,
     ...(r.metadata ?? {}),
@@ -115,7 +115,7 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   if (returnVideo && existsSync(sourcePath)) {
     // Range is part of artifact identity (spec §7): a clip and a full fetch
     // coexist; re-fetching the SAME range overwrites in place.
-    videoPath = join(args.destinationPath, mediaFileName(appliedStart, appliedEnd));
+    videoPath = join(destinationPath, mediaFileName(appliedStart, appliedEnd));
     // Fix 1: only rename a working-directory temp we own -- otherwise
     // (the bare-local-path branch's caller-owned file) copy, so the source
     // survives. Renaming a caller-owned file previously "worked" (no
@@ -208,7 +208,7 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
 /**
  * Documented contract (matching analyze.ts's analyzeVideo/analyzeResolved
  * split): resolve_video RETURNS a structured result rather than throwing.
- * resolveVideoToolAttempt can throw for reasons that have nothing to do
+ * resolveOneVideoAttempt can throw for reasons that have nothing to do
  * with the URL or the resolver -- mkdirSync EEXIST when destinationPath
  * already exists as a file (an ordinary caller mistake, not adversarial
  * input), mediaFileName rejecting a contract-violating range, or both
@@ -216,14 +216,14 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
  * absorbed into a structured ResolveFailure becomes an honest
  * 'extractor_failed' result here instead of an uncaught rejection.
  */
-export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveToolResult> {
+export async function resolveOneVideo(item: ResolveVideoItem, destinationPath: string): Promise<ResolveItemResult> {
   try {
-    return await resolveVideoToolAttempt(args);
+    return await resolveOneVideoAttempt(item, destinationPath);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    let metadataPath = join(args.destinationPath, 'metadata.json');
+    let metadataPath = join(destinationPath, 'metadata.json');
     try {
-      metadataPath = writeMetadata(args.destinationPath, { url: args.url, status: 'extractor_failed', message });
+      metadataPath = writeMetadata(destinationPath, { url: item.url, status: 'extractor_failed', message });
     } catch {
       // destinationPath itself may be unusable (e.g. it exists as a file,
       // not a directory) -- metadataPath still names where it WOULD have
@@ -232,4 +232,15 @@ export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveTo
     }
     return { status: 'extractor_failed', reason: `resolve_video failed: ${message}`, metadataPath };
   }
+}
+
+export interface ResolveToolArgs { destinationPath: string; videos: ResolveVideoItem[]; }
+export interface ResolveToolResult { videos: ResolveItemResult[]; }
+
+export async function resolveVideoTool(args: ResolveToolArgs): Promise<ResolveToolResult> {
+  const n = args.videos.length;
+  const videos = await Promise.all(args.videos.map((item, i) =>
+    resolveOneVideo(item, itemDir(args.destinationPath, i, n)),
+  ));
+  return { videos };
 }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 const analyzeMock = vi.fn();
 vi.mock('../src/analyze.js', () => ({ analyzeVideo: (...a: unknown[]) => analyzeMock(...a) }));
-const { analyzeVideoTool } = await import('../src/agent/analyzeTool.js');
+const { analyzeVideoTool, itemDir } = await import('../src/agent/analyzeTool.js');
 afterEach(() => analyzeMock.mockReset());
 
 const manifest = (over: Record<string, unknown> = {}) => ({
@@ -20,9 +20,9 @@ describe('analyzeVideoTool', () => {
   it('always writes the transcript to disk, even when returning it inline', async () => {
     analyzeMock.mockResolvedValue(manifest());
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(existsSync(r.transcriptPath!)).toBe(true);
-    expect(r.transcript).toBeDefined();
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(existsSync(r.videos[0]!.transcriptPath!)).toBe(true);
+    expect(r.videos[0]!.transcript).toBeDefined();
   });
 
   it('writes the transcript but omits it inline when it is long', async () => {
@@ -35,10 +35,10 @@ describe('analyzeVideoTool', () => {
     const segments = Array.from({ length: 800 }, (_, i) => ({ start: i, end: i + 1, text: `line number ${i} of the transcript` }));
     analyzeMock.mockResolvedValue(manifest({ transcript: { language: 'en', source: 'asr', segments } }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(existsSync(r.transcriptPath!)).toBe(true);
-    expect(r.transcript).toBeUndefined();
-    expect(JSON.parse(readFileSync(r.transcriptPath!, 'utf8')).segments).toHaveLength(800);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(existsSync(r.videos[0]!.transcriptPath!)).toBe(true);
+    expect(r.videos[0]!.transcript).toBeUndefined();
+    expect(JSON.parse(readFileSync(r.videos[0]!.transcriptPath!, 'utf8')).segments).toHaveLength(800);
   });
 
   it('always writes the manifest at the literal expected path (manifest.json)', async () => {
@@ -50,23 +50,23 @@ describe('analyzeVideoTool', () => {
     // three mutants survived a test shaped that way.
     analyzeMock.mockResolvedValue(manifest());
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
     const expectedPath = join(dir, 'manifest.json');
-    expect(r.manifestPath).toBe(expectedPath);
+    expect(r.videos[0]!.manifestPath).toBe(expectedPath);
     expect(existsSync(expectedPath)).toBe(true);
   });
 
   it('passes destinationPath and outDir down so the video and frames land there (spec §2.2)', async () => {
     analyzeMock.mockResolvedValue(manifest());
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
+    await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
     expect(analyzeMock.mock.calls[0]![1]).toMatchObject({ destinationPath: dir, outDir: dir });
   });
 
   it('forwards language as the explicit override (spec §4)', async () => {
     analyzeMock.mockResolvedValue(manifest());
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir, language: 'ja' });
+    await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v', language: 'ja' }] });
     expect(analyzeMock.mock.calls[0]![1]).toMatchObject({ preferredLanguage: 'ja' });
   });
 
@@ -76,9 +76,9 @@ describe('analyzeVideoTool', () => {
       transcript: null, frames: [],
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(r.status).toBe('unsupported');
-    expect(r.frameCount).toBe(0);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(r.videos[0]!.status).toBe('unsupported');
+    expect(r.videos[0]!.frameCount).toBe(0);
   });
 
   it('returns a structured failure instead of throwing when destinationPath exists as a file (EEXIST)', async () => {
@@ -92,10 +92,10 @@ describe('analyzeVideoTool', () => {
     const parent = mkdtempSync(join(tmpdir(), 'norma-at-'));
     const notADir = join(parent, 'blocked');
     writeFileSync(notADir, 'i am a file, not a directory');
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: notADir });
-    expect(r.status).not.toBe('ok');
-    expect(typeof r.manifestPath).toBe('string');
-    expect(r.videoPath).toBeUndefined();
+    const r = await analyzeVideoTool({ destinationPath: notADir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(r.videos[0]!.status).not.toBe('ok');
+    expect(typeof r.videos[0]!.manifestPath).toBe('string');
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('returns a structured failure instead of throwing when analyzeVideo itself rejects unexpectedly', async () => {
@@ -107,10 +107,10 @@ describe('analyzeVideoTool', () => {
     // unhandled rejection to the caller.
     analyzeMock.mockRejectedValue(new Error('pipeline exploded'));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(r.status).not.toBe('ok');
-    expect(r.reason).toContain('pipeline exploded');
-    expect(r.videoPath).toBeUndefined();
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(r.videos[0]!.status).not.toBe('ok');
+    expect(r.videos[0]!.reason).toContain('pipeline exploded');
+    expect(r.videos[0]!.videoPath).toBeUndefined();
   });
 
   it('reports degradation warnings so silent failure is visible', async () => {
@@ -118,15 +118,15 @@ describe('analyzeVideoTool', () => {
       processing: { selectedFrames: 1, candidateFrames: 3, peakRssMb: 100, selectorVersion: '1', frameMode: 'key', warnings: ['ocr unavailable'] },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(r.warnings).toEqual(['ocr unavailable']);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(r.videos[0]!.warnings).toEqual(['ocr unavailable']);
   });
 
   it('omits transcriptPath entirely when no transcript was produced', async () => {
     analyzeMock.mockResolvedValue(manifest({ transcript: null }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: 'https://x/v', destinationPath: dir });
-    expect(r.transcriptPath).toBeUndefined();
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v' }] });
+    expect(r.videos[0]!.transcriptPath).toBeUndefined();
   });
 
   it('does not copy a local source into destinationPath (spec §2.1)', async () => {
@@ -140,8 +140,8 @@ describe('analyzeVideoTool', () => {
       source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: local },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
-    expect(r.videoPath).toBe(local);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: local }] });
+    expect(r.videos[0]!.videoPath).toBe(local);
     expect(readdirSync(dir).filter((f) => f.endsWith('.mp4'))).toEqual([]);
   });
 
@@ -163,7 +163,7 @@ describe('analyzeVideoTool', () => {
       source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: local },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
+    await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: local }] });
     const opts = analyzeMock.mock.calls[0]![1] as Record<string, unknown>;
     expect(opts.outDir).not.toBe(dir);
   });
@@ -187,12 +187,12 @@ describe('analyzeVideoTool', () => {
       frames: [{ timestamp: 1, sceneId: 0, image: framePath, importance: 0.5, reasons: [], ocrContent: null, transcriptWindow: null, nearestSelectedSimilarity: 0 }],
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: local }] });
     const expectedFrame = join(dir, 'f1.jpg');
-    expect(r.framePaths).toEqual([expectedFrame]);
+    expect(r.videos[0]!.framePaths).toEqual([expectedFrame]);
     expect(existsSync(expectedFrame)).toBe(true);
     expect(existsSync(framePath)).toBe(false);
-    const saved = JSON.parse(readFileSync(r.manifestPath, 'utf8'));
+    const saved = JSON.parse(readFileSync(r.videos[0]!.manifestPath, 'utf8'));
     expect(saved.frames[0].image).toBe(expectedFrame);
   });
 
@@ -219,9 +219,9 @@ describe('analyzeVideoTool', () => {
       source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: ephemeralCopy },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
-    expect(r.status).toBe('ok');
-    expect(r.videoPath).toBe(local);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: local }] });
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[0]!.videoPath).toBe(local);
     expect(existsSync(local)).toBe(true);
     expect(existsSync(ephemeralCopy)).toBe(false);
   });
@@ -240,9 +240,71 @@ describe('analyzeVideoTool', () => {
       source: { url: local, platform: 'local', title: 'T', duration: 10, resolvedBy: 'direct', status: 'ok', filePath: local },
     }));
     const dir = mkdtempSync(join(tmpdir(), 'norma-at-'));
-    const r = await analyzeVideoTool({ pathOrUrl: local, destinationPath: dir });
-    expect(r.status).toBe('ok');
-    expect(r.videoPath).toBe(local);
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [{ pathOrUrl: local }] });
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[0]!.videoPath).toBe(local);
     expect(existsSync(local)).toBe(true);
+  });
+});
+
+describe('batching (spec §3-§5)', () => {
+  it('itemDir: flat at N=1, video-N subdirs at N>1', () => {
+    expect(itemDir('/d', 0, 1)).toBe('/d');
+    expect(itemDir('/d', 0, 3)).toBe(join('/d', 'video-1'));
+    expect(itemDir('/d', 2, 3)).toBe(join('/d', 'video-3'));
+  });
+
+  it('N=2 writes each item into its own subdir -- manifests do not collide', async () => {
+    // mock analyzeVideo to return ok manifests with distinct titles per URL
+    analyzeMock.mockImplementation(async (url: string) => manifest({
+      source: { url, platform: 'p', title: `T-${url}`, duration: 10, resolvedBy: 'ytdlp', status: 'ok', filePath: '/x/work.mp4' },
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-batch-'));
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [
+      { pathOrUrl: 'https://x.test/a' }, { pathOrUrl: 'https://x.test/b' },
+    ]});
+    expect(r.videos).toHaveLength(2);
+    expect(r.videos[0]!.manifestPath).toBe(join(dir, 'video-1', 'manifest.json'));
+    expect(r.videos[1]!.manifestPath).toBe(join(dir, 'video-2', 'manifest.json'));
+    expect(existsSync(r.videos[0]!.manifestPath)).toBe(true);
+    expect(existsSync(r.videos[1]!.manifestPath)).toBe(true);
+    const m1 = JSON.parse(readFileSync(r.videos[0]!.manifestPath, 'utf8'));
+    const m2 = JSON.parse(readFileSync(r.videos[1]!.manifestPath, 'utf8'));
+    expect(m1.source.url).not.toBe(m2.source.url);   // kills the shared-directory mutant
+  });
+
+  it('partial failure: item statuses are independent, the call resolves', async () => {
+    // mock analyzeVideo: ok for /a, extractor_failed manifest for /b
+    analyzeMock.mockImplementation(async (url: string) => (
+      url.endsWith('/dead')
+        ? manifest({
+            source: { url, platform: 'unknown', title: '', duration: 0, resolvedBy: 'none', status: 'extractor_failed', reason: 'dead link' },
+            transcript: null, frames: [],
+          })
+        : manifest({ source: { url, platform: 'p', title: 'T', duration: 10, resolvedBy: 'ytdlp', status: 'ok', filePath: '/x/work.mp4' } })
+    ));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-batch-pf-'));
+    const r = await analyzeVideoTool({ destinationPath: dir, videos: [
+      { pathOrUrl: 'https://x.test/a' }, { pathOrUrl: 'https://x.test/dead' },
+    ]});
+    expect(r.videos[0]!.status).toBe('ok');
+    expect(r.videos[1]!.status).toBe('extractor_failed');
+    expect(r.videos[1]!.manifestPath).toBe(join(dir, 'video-2', 'manifest.json'));
+  });
+
+  it('hooks: run wraps each item, onStage/onQueued carry the item index', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-batch-hooks-'));
+    const ran: number[] = []; const staged: Array<[number, string]> = [];
+    let live = 0, peak = 0;
+    await analyzeVideoTool(
+      { destinationPath: dir, videos: [{ pathOrUrl: 'https://x.test/a' }, { pathOrUrl: 'https://x.test/b' }] },
+      {
+        run: async (fn) => { live++; peak = Math.max(peak, live); ran.push(live); const r = await fn(); live--; return r; },
+        onStage: (i, s) => staged.push([i, s]),
+        onItemStart: (i) => staged.push([i, 'start']),
+      },
+    );
+    expect(ran).toHaveLength(2);                       // every item went through run
+    expect(staged.filter(([, s]) => s === 'start').map(([i]) => i).sort()).toEqual([0, 1]);
   });
 });
