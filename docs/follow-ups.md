@@ -53,3 +53,18 @@ State these explicitly rather than leaving them implicit:
 ## G. Range parameters require both bounds
 
 `resolve_video` and `analyze_video` both gate range extraction on `start` **and** `end` being supplied together (`src/resolve/ytdlp.ts`, `src/analyze.ts`, `src/agent/resolveTool.ts`). Passing just one is silently treated as no range at all — the whole video is fetched/analyzed rather than "from here to the end" or "from the start to here." Treating a lone `start` as "to the end of the video" (or a lone `end` as "from the start") is a reasonable alternative and was considered; requiring both is a deliberate current limitation, not an oversight, and the tool descriptions now say so explicitly rather than leaving it for a caller to discover by surprise.
+
+## H. Left open after the v2 agent-surface branch
+
+The v2 branch (two-tool MCP surface) closed its own final review with four Critical fixes. These were adjudicated as deferred rather than fixed, and are recorded here because the branch's scratch workspace is deleted at merge.
+
+**Do this one first.** `src/resolve/direct.ts`'s safe-default direction — `returnVideo === undefined` means download, which `analyze.ts` relies on because it never sets the flag — is untested at its boundary. Every test passes the flag explicitly. Mutating it to `!== true` breaks every direct/HLS URL in `analyze_video` and yet survives the entire suite. It is correct today; the coverage hole is what makes it dangerous.
+
+Other open items, in rough priority order:
+
+- **The `*7-7` degenerate download section is unverified.** `analyze_video` accepts URLs, and the description recommends `start === end` with `frames: "even"` for a single frame. For yt-dlp sources that produces `--download-sections *7-7`, a zero-length section. This cannot be checked offline and needs one manual run once real matrix URLs exist.
+- A clipped fetch reports `appliedEnd - appliedStart` as its duration rather than the probed length of the clip. In the resolver-applied case yt-dlp had already probed a genuine value, and keyframe snapping is accepted within ±max(1.5s, 15%), so an accurate measurement is discarded for an arithmetic one. `r.rangeApplied` distinguishes the two sub-cases cleanly.
+- `'even'` and `'none'` frames now come from the un-normalized source (spec §8's cheapness rules out re-encoding), so returned JPEGs are at the source's own resolution rather than the normalized 720p — measured 1920x1080 versus 1280x720 for the same instant. Correct, but the tool description does not mention it.
+- WeChat skips its own cheap discovery calls under `returnVideo: false` and falls back to a synthetic "WeChat video &lt;id&gt;" title, even though `get_parse_result` genuinely carries a real title and author. Defensible as conservative — fewer hits on an unofficial credential-gated endpoint — but it means a default `resolve_video` on a named platform returns almost nothing.
+- The `analyze_video` no-copy guard asserts its working directory is not *equal* to `destinationPath`. A working directory placed one level *inside* the destination would slip through. The real bug (exact assignment) is caught; tighten to a `startsWith` check.
+- `chapters` defaults to `[]` for sources that structurally have none, the same zero-as-fact shape `duration` was deliberately fixed to avoid.
