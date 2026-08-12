@@ -18,10 +18,47 @@ const tag = (n: number): string => String(Math.round(n * 100) / 100).replace('.'
  * Spec §7: a clip and a full fetch are different artifacts and must not
  * silently overwrite each other; re-fetching the SAME range must overwrite
  * in place so repeating a call is safe.
+ *
+ * Finding 1 fix: All four shapes produce distinct filenames:
+ *   - full (no bounds): source.mp4
+ *   - start-only: source_s${start}.mp4
+ *   - end-only: source_e${end}.mp4
+ *   - both bounds: source_s${start}_e${end}.mp4
+ * The s/e prefixes make the distinction unambiguous and collision-free even with negatives.
+ *
+ * Finding 2 fix: ext is validated to alphanumeric only; path traversal throws.
+ *
+ * Finding 3 fix: Non-finite numbers (NaN, Infinity, -Infinity) throw.
+ * Note: rounding to 2 decimals means ranges like 0.001 and 0.002 both round to 0.00
+ * and produce identical filenames; this is intentional, as sub-centisecond precision
+ * is meaningless for video.
  */
 export function mediaFileName(start?: number, end?: number, ext = 'mp4'): string {
-  if (start === undefined || end === undefined) return `source.${ext}`;
-  return `source_${tag(start)}-${tag(end)}.${ext}`;
+  // Finding 2: validate extension
+  if (!/^[a-zA-Z0-9]+$/.test(ext)) {
+    throw new Error(`Invalid extension: must be alphanumeric only, got "${ext}"`);
+  }
+
+  // Finding 3: validate non-finite numbers
+  if (start !== undefined && !Number.isFinite(start)) {
+    throw new Error(`Invalid start: must be finite, got ${start}`);
+  }
+  if (end !== undefined && !Number.isFinite(end)) {
+    throw new Error(`Invalid end: must be finite, got ${end}`);
+  }
+
+  // Finding 1: encode all four shapes distinctly
+  if (start === undefined && end === undefined) {
+    return `source.${ext}`;
+  }
+  if (start !== undefined && end === undefined) {
+    return `source_s${tag(start)}.${ext}`;
+  }
+  if (start === undefined && end !== undefined) {
+    return `source_e${tag(end)}.${ext}`;
+  }
+  // Both defined
+  return `source_s${tag(start!)}_e${tag(end!)}.${ext}`;
 }
 
 function writeJson(dir: string, name: string, value: unknown): string {
