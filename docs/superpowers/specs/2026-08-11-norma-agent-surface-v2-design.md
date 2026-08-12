@@ -135,7 +135,9 @@ The alternative — passing the original URL to `analyze_video` with original ti
 
 ## 6. Platform support, stated honestly
 
-The `resolve_video` description names what is genuinely exercised — YouTube, TikTok, Facebook and Reels, X, Instagram, Twitch, Vimeo, Reddit, WeChat Channels, and direct MP4/HLS — then says plainly that many other sites work through generic extraction, some will not, and a range request that cannot be applied yields the full video rather than a failure.
+The `resolve_video` description names what is genuinely exercised — YouTube, TikTok, Facebook and Reels, X, Instagram, Twitch, Vimeo, Reddit, WeChat Channels, and direct MP4/HLS — then says plainly that many other sites work through generic extraction and some will not.
+
+**On ranges (revised — the clause this replaced described v1 behaviour and stopped being true once the local-trim fallback shipped):** when a resolver cannot apply the requested range itself, it is trimmed locally instead (yt-dlp's own fallback, and the direct/WeChat path, which never applies a range natively). If that local trim also fails, the call returns an honest failure — `extractor_failed`, no `videoPath` — never the full video mislabeled as the requested clip. The one case that still returns the full video silently, and the one the tool descriptions must state plainly, is a half-specified range: both the resolver's own range gate and the local-trim fallback require `start` **and** `end` together, so supplying just one is treated as no range at all.
 
 ## 7. Idempotent writes
 

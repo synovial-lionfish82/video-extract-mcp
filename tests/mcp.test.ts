@@ -120,6 +120,31 @@ describe('resolve_video', () => {
     await client.close();
   });
 
+  it("start/end descriptions state the both-or-neither requirement (task-9 Step 6): passing only one is ignored and fetches the whole video", async () => {
+    // Task 8's review found neither tool's description said what happens
+    // when a range is only half-specified. resolve_video's own range gate
+    // (src/resolve/ytdlp.ts:241 -- wantsRange requires BOTH opts.start and
+    // opts.end -- and src/agent/resolveTool.ts:82's local-trim fallback,
+    // gated the same way) silently treats a lone start or end as no range
+    // at all and returns the whole video. Reads the description straight
+    // off the LIVE registered schema via listTools(), NOT a hardcoded
+    // string also written in this file -- a constant compared to itself
+    // would pass regardless of what src/mcp.ts actually says, which is
+    // exactly the trap this test is written to avoid.
+    const client = await connectClient(buildServer());
+    const { tools } = await client.listTools();
+    const resolveVideo = tools.find((t) => t.name === 'resolve_video');
+    if (!resolveVideo) throw new Error('resolve_video not found in listTools()');
+    const props = resolveVideo.inputSchema.properties as Record<string, { description?: string }> | undefined;
+    const startDesc = props?.start?.description ?? '';
+    const endDesc = props?.end?.description ?? '';
+    expect(startDesc).toMatch(/either alone is ignored/i);
+    expect(startDesc.toLowerCase()).toContain('whole video');
+    expect(endDesc).toMatch(/either alone is ignored/i);
+    expect(endDesc.toLowerCase()).toContain('whole video');
+    await client.close();
+  });
+
   it('accepts a valid call and resolves a REAL local synthetic video end-to-end, downloading it when returnVideo is requested', async () => {
     const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-resolve-src-'));
     const video = await makeTestVideo(join(srcDir, 'v.mp4'), 6);

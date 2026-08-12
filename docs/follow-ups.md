@@ -47,3 +47,7 @@ State these explicitly rather than leaving them implicit:
 - When yt-dlp performs a sectioned download, it snaps to keyframes and may start slightly before the requested point, so caption re-basing can be off by up to ~1.5 s. This is a small constant offset, not the range-sized misalignment that was fixed.
 - Automatic-caption track ordering can prefer a machine-translated English track over the original language when no preference and no platform hint are available.
 - There is no CI, and no CI would fetch the roughly 1.5 GB of models, so the model-backed integration tests will skip in any automated run. The real speech and embedding integration currently rests on local execution.
+
+## G. Range parameters require both bounds
+
+`resolve_video` and `analyze_video` both gate range extraction on `start` **and** `end` being supplied together (`src/resolve/ytdlp.ts`, `src/analyze.ts`, `src/agent/resolveTool.ts`). Passing just one is silently treated as no range at all — the whole video is fetched/analyzed rather than "from here to the end" or "from the start to here." Treating a lone `start` as "to the end of the video" (or a lone `end` as "from the start") is a reasonable alternative and was considered; requiring both is a deliberate current limitation, not an oversight, and the tool descriptions now say so explicitly rather than leaving it for a caller to discover by surprise.
