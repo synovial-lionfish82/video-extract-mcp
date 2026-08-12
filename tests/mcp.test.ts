@@ -241,6 +241,46 @@ describe('analyze_video', () => {
     await client.close();
   });
 
+  it('maxFrames: 0 with no frames given aliases to frames: "none" (Fix 3)', async () => {
+    // Pre-fix, mcp.ts's frames field carried `.default('key')`, so `frames`
+    // was NEVER undefined by the time resolveFrameMode ran and the
+    // zero-budget alias (spec §2.2) could never be reached through this
+    // server at all -- even though resolveFrameMode itself has always
+    // handled it correctly (tests/typesV2.test.ts:8). Asserted at the claim
+    // level, through a REAL call and the manifest actually written to disk,
+    // not by calling resolveFrameMode directly.
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-zero-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 6);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-zero-'));
+    const client = await connectClient(buildServer());
+    const content = await callToolOk(client, {
+      name: 'analyze_video',
+      arguments: { pathOrUrl: video, destinationPath: destDir, maxFrames: 0, transcript: false },
+    });
+    const result = JSON.parse(firstText(content)) as { status: string; frameCount: number; manifestPath: string };
+    expect(result.status).toBe('ok');
+    expect(result.frameCount).toBe(0);
+    const manifest = JSON.parse(readFileSync(result.manifestPath, 'utf8')) as { processing: { frameMode: string } };
+    expect(manifest.processing.frameMode).toBe('none');
+    await client.close();
+  }, 30_000);
+
+  it('an explicit frames value wins over maxFrames: 0 (Fix 3 nuance): "even" is not silently downgraded to "none"', async () => {
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-explicit-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 6);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-explicit-'));
+    const client = await connectClient(buildServer());
+    const content = await callToolOk(client, {
+      name: 'analyze_video',
+      arguments: { pathOrUrl: video, destinationPath: destDir, frames: 'even', maxFrames: 0, transcript: false },
+    });
+    const result = JSON.parse(firstText(content)) as { status: string; manifestPath: string };
+    expect(result.status).toBe('ok');
+    const manifest = JSON.parse(readFileSync(result.manifestPath, 'utf8')) as { processing: { frameMode: string } };
+    expect(manifest.processing.frameMode).toBe('even');
+    await client.close();
+  }, 30_000);
+
   it('accepts a syntactically valid call and runs the REAL handler through a clean early-failure path (no network, no models)', async () => {
     // Deliberately does not exercise the full pipeline (model loading,
     // downloads) -- analyzeVideo's own step 1 is resolve(), and a
