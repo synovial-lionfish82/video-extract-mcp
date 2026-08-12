@@ -1,15 +1,17 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { analyzeVideo } from './analyze.js';
-import { getFrame, getClip } from './primitives.js';
-import { resolve } from './resolve/index.js';
+import { resolveVideoTool } from './agent/resolveTool.js';
+import { analyzeVideoTool } from './agent/analyzeTool.js';
 import { isMainModule } from './util/entry.js';
 
-export const TOOL_NAMES = ['analyze_video', 'resolve_video', 'get_frame', 'get_clip'] as const;
+export const TOOL_NAMES = ['resolve_video', 'analyze_video'] as const;
+
+const PLATFORMS =
+  'Known-working sources: YouTube, TikTok, Facebook and Reels, X/Twitter, Instagram, '
+  + 'Twitch, Vimeo, Reddit, WeChat Channels, and direct .mp4/.m3u8 URLs. Many other '
+  + 'sites work through generic extraction; some will not, and those return a clear '
+  + 'failure status rather than throwing.';
 
 /**
  * Exposes the finished engine to AI agents over MCP. Built with
@@ -24,19 +26,53 @@ export const TOOL_NAMES = ['analyze_video', 'resolve_video', 'get_frame', 'get_c
  */
 export function buildServer(): McpServer {
   const server = new McpServer(
-    { name: 'norma-video', version: '0.1.0' },
+    { name: 'norma-video', version: '2.0.0' },
     {
       instructions:
-        'Video extraction for AI agents. Typical flow: call analyze_video directly -- it '
-        + 'returns a transcript plus important, deduplicated keyframes, AND (on success) '
-        + "source.filePath, a local path to the downloaded video on this machine. If the "
-        + 'overview turns up something worth a closer look at a specific moment, call '
-        + 'get_frame or get_clip against that filePath to inspect the moment densely instead '
-        + 'of reprocessing the whole video. Call resolve_video only when you need a fast '
-        + 'upfront check of whether a URL can be extracted at all before committing to '
-        + "analyze_video's slower full pipeline -- resolve_video still downloads the full "
-        + 'media itself (it only skips transcription/embedding/OCR), so calling it before '
-        + 'analyze_video on the same URL means downloading that video twice.',
+        'Video extraction for AI agents, in two tools. resolve_video looks a video up '
+        + 'and, by default, returns only its metadata -- title, creator, duration and '
+        + 'chapters -- without downloading anything heavy; pass returnVideo: true when '
+        + 'you actually want the media file. analyze_video does the real work: transcript '
+        + 'plus important, deduplicated keyframes. Both write their output to a directory '
+        + 'you choose (destinationPath), returning a compact summary plus file paths '
+        + 'rather than dumping everything into the conversation. A good habit on a long '
+        + 'video is to call resolve_video first, read the chapter list, then call '
+        + 'analyze_video with start/end covering only the chapter that matters -- for '
+        + 'supported sources that downloads just that section instead of the whole video.',
+    },
+  );
+
+  server.registerTool(
+    'resolve_video',
+    {
+      title: 'Resolve video (metadata, optionally the file)',
+      description:
+        'Looks up a video and writes what it finds to destinationPath. By DEFAULT it '
+        + 'returns metadata only and does NOT download the media: title, creator, '
+        + 'duration, chapter list (when the platform provides one), a short description '
+        + 'preview, and a path to the full metadata file. That is the cheap way to decide '
+        + 'what to do next. Set returnVideo: true to also download the media file -- that '
+        + 'is a real download and takes real time. With returnVideo: true you may also '
+        + 'pass start/end to fetch only a section; for supported sources only that section '
+        + 'is downloaded, and a fetched clip STARTS AT 0 rather than at the original '
+        + 'timestamp (the result says so, and gives the offset). Use this tool when you '
+        + 'only need to know what a video is, or when you want the video file itself '
+        + 'without any analysis. ' + PLATFORMS + ' Comments are off by default and can be '
+        + 'slow to fetch on popular videos; when enabled they are written to the metadata '
+        + 'file, never returned inline.',
+      inputSchema: {
+        url: z.string().describe('Page or direct video URL.'),
+        destinationPath: z.string().describe('Directory to write metadata (and the video, if requested) into. Created if missing. Re-running the same call overwrites in place.'),
+        returnVideo: z.boolean().optional().default(false).describe('Download the media file as well as its metadata. Default false -- metadata only.'),
+        start: z.number().optional().describe('Start second of the section to fetch. Only meaningful with returnVideo: true.'),
+        end: z.number().optional().describe('End second of the section to fetch. Only meaningful with returnVideo: true.'),
+        comments: z.boolean().optional().default(false).describe('Also fetch comments into the metadata file. Off by default: can be very slow on popular videos.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      const r = await resolveVideoTool(args);
+      return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
     },
   );
 
@@ -45,126 +81,43 @@ export function buildServer(): McpServer {
     {
       title: 'Analyze video',
       description:
-        'Primary extraction tool: given one video URL, downloads and analyzes it end-to-end '
-        + 'and returns a JSON manifest with the spoken/on-screen transcript (when available) '
-        + 'plus a small set of important, deduplicated keyframes -- not every frame, just the '
-        + 'ones that matter (scene changes, on-screen text, visual novelty). This can take '
-        + 'anywhere from several seconds to a few minutes depending on video length, network '
-        + 'speed and mode; a long wait does not mean it is stuck. On failure (private video, '
-        + 'DRM-protected, unsupported site, not found, ...) this returns a manifest whose '
-        + "source.status is not 'ok' with a human-readable reason, rather than throwing -- "
-        + 'always check source.status before trusting the rest of the manifest. Each returned '
-        + "frame's image field is a local file path on this machine, not a URL. On success, "
-        + 'source.filePath is ALSO a local path on this machine, pointing at the full '
-        + '(downloaded and normalized) working video -- pass it to get_frame/get_clip for a '
-        + 'closer look at a specific moment; source.filePath is absent on failure. Call '
-        + 'resolve_video first only if you need a fast upfront check of whether a URL can be '
-        + "extracted at all before committing to this tool's slower full pipeline -- note "
-        + 'that resolve_video still downloads the full media itself, so calling it before '
-        + 'this tool on the same URL means downloading that video twice. Also check '
-        + 'processing.warnings: optional stages that failed and were degraded past (OCR, '
-        + 'image embeddings, speech recognition) each record an entry there, so an empty '
-        + 'transcript or missing on-screen text can be told apart from a healthy video that '
-        + 'simply has none.',
+        'Given a video URL or a local video file, returns its transcript and a small set '
+        + 'of important, deduplicated keyframes -- not every frame, just the ones that '
+        + 'carry information (scene changes, on-screen text, visual novelty). Output is '
+        + 'written to destinationPath: a manifest, the transcript, and the frame images; '
+        + 'the reply is a summary plus those paths, with the transcript included inline '
+        + 'when it is short. Use start/end to analyze only part of a video -- for '
+        + 'supported sources only that section is downloaded, and the transcript covers '
+        + 'just that section. frames controls how frames are chosen: "key" (default) picks '
+        + 'the most informative ones, "even" samples the range uniformly (maxFrames over '
+        + 'the window sets the density, so 60 frames across 30 seconds is 2 per second), '
+        + 'and "none" returns no frames at all, which is how you ask for a transcript '
+        + 'alone. For a single exact frame, set start and end to the same second with '
+        + 'frames: "even", maxFrames: 1 and transcript: false -- a single instant has no '
+        + 'speech to transcribe, and leaving transcript on makes the cheapest request pay '
+        + "for the whole video's transcription. On failure this returns a result whose status "
+        + 'is not "ok" with a readable reason, rather than throwing -- always check status '
+        + 'first. Check warnings too: any optional stage that failed and was skipped past '
+        + '(on-screen text, image analysis, speech recognition) records an entry there, so '
+        + 'an empty transcript can be told apart from a video that simply has no speech. '
+        + 'The result also carries videoPath, the local file it worked from, which you can '
+        + 'pass straight back in to inspect another moment without re-downloading. '
+        + PLATFORMS,
       inputSchema: {
-        url: z.string().describe('Page or direct video URL to extract (e.g. a YouTube/TikTok/WeChat Channels link, or a direct .mp4/.m3u8 URL).'),
-        start: z.number().optional().describe('Start second of the range to analyze -- provide together with end (start alone, or end alone, has no effect). Omit both to analyze the whole video.'),
-        end: z.number().optional().describe('End second of the range to analyze -- see start.'),
-        maxFrames: z.number().optional().default(35).describe('Maximum number of keyframes to return after deduplication. Default 35.'),
-        preferredLanguage: z.string().optional().describe('Language hint for transcription/OCR, e.g. "zh", "ja", "en". Improves accuracy when the language is known but not otherwise detectable from the URL.'),
-        mode: z.enum(['fast', 'accurate']).optional().default('accurate').describe('"accurate" (default): full quality pipeline. "fast": quicker, lower quality.'),
+        pathOrUrl: z.string().describe('A video URL, or a path to a video file already on this machine. Both are accepted.'),
+        destinationPath: z.string().describe('Directory to write the manifest, transcript and frames into. Created if missing.'),
+        start: z.number().optional().describe('Start second of the range to analyze. Provide with end; either alone is ignored. Note that if pathOrUrl is a clip previously fetched with a range, times are relative to that clip, which starts at 0.'),
+        end: z.number().optional().describe('End second of the range. Set equal to start for a single instant.'),
+        frames: z.enum(['key', 'even', 'none']).optional().default('key').describe('"key": the most informative frames, deduplicated. "even": uniform sampling across the range. "none": no frames (transcript only).'),
+        maxFrames: z.number().optional().default(35).describe('Maximum frames to return. With frames "even" this sets density across the range. 0 means the same as frames: "none".'),
+        transcript: z.boolean().optional().default(true).describe('Produce a transcript. Set false to skip transcription entirely when you only want frames.'),
+        language: z.string().optional().describe('Language hint such as "zh", "ja" or "en". Usually inferred from the platform; supply it when the source carries no language metadata or the guess is wrong.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async (args) => {
-      const m = await analyzeVideo(args.url, args);
-      return { content: [{ type: 'text', text: JSON.stringify(m, null, 2) }] };
-    },
-  );
-
-  server.registerTool(
-    'resolve_video',
-    {
-      title: 'Resolve video (check without analyzing)',
-      description:
-        'Resolves a URL to determine whether it can be extracted at all, WITHOUT '
-        + 'transcribing audio, computing embeddings, or scanning for keyframes -- much faster '
-        + 'than analyze_video since it skips those stages. It is NOT cheap or free, though: '
-        + 'on success it still performs a full download of the video (and, depending on the '
-        + 'source, its audio and subtitle tracks) -- the same download analyze_video itself '
-        + 'would perform. Calling this and then analyze_video on the SAME URL downloads that '
-        + 'video twice; prefer calling analyze_video directly when you already expect to want '
-        + 'its output. Returns platform, title, duration, available captions, and a local '
-        + 'filePath to the downloaded source video on this machine. Caption reporting: '
-        + 'captions.manual is the deliberately-chosen human caption track when one exists; '
-        + 'captions.auto is fetched and reported only when NO manual track exists (manual '
-        + 'always wins the transcript tier, so auto availability is not probed behind it). '
-        + 'On failure, returns a specific status (e.g. \'auth_required\', '
-        + "'unsupported', 'not_found', 'needs_interaction') and a human-readable reason "
-        + 'instead of throwing. Use this on its own when you only need to check '
-        + 'extractability, or need a local video file path without paying for '
-        + 'transcription/embedding/OCR.',
-      inputSchema: {
-        url: z.string().describe('Page or direct video URL to check.'),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
-    async ({ url }) => {
-      const r = await resolve(url, { workDir: mkdtempSync(join(tmpdir(), 'norma-res-')) });
+      const r = await analyzeVideoTool(args);
       return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
-    },
-  );
-
-  server.registerTool(
-    'get_frame',
-    {
-      title: 'Get one frame',
-      description:
-        'Extracts a single frame at an exact timestamp from a video file ALREADY DOWNLOADED '
-        + 'TO THIS MACHINE. source must be a local filesystem path (e.g. the source.filePath '
-        + "returned by a successful analyze_video call, or resolve_video's filePath) -- NOT a "
-        + 'URL; passing a URL will fail. This is the fine half of the coarse-to-fine workflow: '
-        + "once analyze_video's overview points at a moment worth a closer look, call "
-        + 'get_frame with that exact timestamp in seconds. Returns the local file path of the '
-        + 'extracted JPEG.',
-      inputSchema: {
-        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. a successful analyze_video call\'s source.filePath, or resolve_video\'s filePath). NOT a URL.'),
-        timestamp: z.number().describe('Timestamp in seconds to extract.'),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async ({ source, timestamp }) => {
-      const p = await getFrame(source, timestamp);
-      return { content: [{ type: 'text', text: p }] };
-    },
-  );
-
-  server.registerTool(
-    'get_clip',
-    {
-      title: 'Get a clip (dense sampling)',
-      description:
-        'Densely samples frames across a narrow time window from a video file ALREADY '
-        + 'DOWNLOADED TO THIS MACHINE. source must be a local filesystem path (e.g. the '
-        + "source.filePath returned by a successful analyze_video call, or resolve_video's "
-        + 'filePath) -- NOT a URL; passing a URL will fail. Use this for the coarse-to-fine '
-        + "second pass: after analyze_video's overview flags something interesting around a "
-        + 'timestamp (say, something at 8:31 = 511s), call get_clip with source set to that '
-        + 'same analyze_video call\'s source.filePath and a narrow window around the '
-        + 'timestamp (e.g. start=505, end=515) to sample it densely -- at fps frames per '
-        + 'second, default 2 -- instead of reprocessing the entire video. Returns the local '
-        + 'file paths of the extracted JPEGs, in chronological order.',
-      inputSchema: {
-        source: z.string().describe('Local filesystem path to an already-downloaded video file (e.g. a successful analyze_video call\'s source.filePath, or resolve_video\'s filePath). NOT a URL.'),
-        start: z.number().describe('Start second of the window to sample.'),
-        end: z.number().describe('End second of the window to sample.'),
-        fps: z.number().optional().default(2).describe('Sampling rate in frames per second. Default 2 -- higher values give denser sampling at the cost of more frames.'),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async ({ source, start, end, fps }) => {
-      const frames = await getClip(source, start, end, fps);
-      return { content: [{ type: 'text', text: JSON.stringify(frames, null, 2) }] };
     },
   );
 
