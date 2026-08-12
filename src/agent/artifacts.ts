@@ -32,6 +32,12 @@ const tag = (n: number): string => String(Math.round(n * 100) / 100).replace('.'
  * Note: rounding to 2 decimals means ranges like 0.001 and 0.002 both round to 0.00
  * and produce identical filenames; this is intentional, as sub-centisecond precision
  * is meaningless for video.
+ *
+ * Item 2 fix: Extreme-magnitude finite values that overflow the rounding throw.
+ * Threshold is Number.MAX_VALUE / 100 (approximately 1.8e306). Values whose
+ * magnitude is greater than or equal to this will overflow n * 100 to Infinity,
+ * causing collisions. This is a programming error (timestamps near 1e306 seconds
+ * indicate unit-conversion bugs), so throwing is appropriate.
  */
 export function mediaFileName(start?: number, end?: number, ext = 'mp4'): string {
   // Finding 2: validate extension
@@ -45,6 +51,15 @@ export function mediaFileName(start?: number, end?: number, ext = 'mp4'): string
   }
   if (end !== undefined && !Number.isFinite(end)) {
     throw new Error(`Invalid end: must be finite, got ${end}`);
+  }
+
+  // Item 2: detect overflow in rounding (n * 100 > Number.MAX_VALUE)
+  const ROUNDING_OVERFLOW_THRESHOLD = Number.MAX_VALUE / 100;
+  if (start !== undefined && Math.abs(start) >= ROUNDING_OVERFLOW_THRESHOLD) {
+    throw new Error(`Value too large for timestamp encoding: start ${start} exceeds overflow threshold`);
+  }
+  if (end !== undefined && Math.abs(end) >= ROUNDING_OVERFLOW_THRESHOLD) {
+    throw new Error(`Value too large for timestamp encoding: end ${end} exceeds overflow threshold`);
   }
 
   // Finding 1: encode all four shapes distinctly

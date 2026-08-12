@@ -120,6 +120,18 @@ describe('mediaFileName (spec §7: range is part of identity)', () => {
       expect(name1).toBe(name2);
     });
   });
+
+  describe('extreme magnitude overflow (Item 2: reject overflow-inducing values)', () => {
+    it('throws on extreme-magnitude end that overflows tag rounding', () => {
+      expect(() => mediaFileName(12, 1.8e306)).toThrow();
+    });
+    it('throws on extreme-magnitude end that is larger than overflow threshold', () => {
+      expect(() => mediaFileName(12, 1.9e306)).toThrow();
+    });
+    it('accepts a large finite value below overflow threshold', () => {
+      expect(() => mediaFileName(12, 1e306)).not.toThrow();
+    });
+  });
 });
 
 describe('writeMetadata', () => {
@@ -138,6 +150,14 @@ describe('writeMetadata', () => {
 });
 
 describe('writeTranscript (minor finding: coverage)', () => {
+  it('writes to the correct literal filename (transcript.json)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-art-'));
+    const t = { language: 'en', source: 'manual' as const, segments: [] };
+    const p = writeTranscript(dir, t);
+    const expectedPath = join(dir, 'transcript.json');
+    expect(p).toBe(expectedPath);
+    expect(existsSync(expectedPath)).toBe(true);
+  });
   it('replaces an existing transcript file rather than duplicating it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'norma-art-'));
     const t1 = { language: 'en', source: 'manual' as const, segments: [] };
@@ -157,6 +177,19 @@ describe('writeTranscript (minor finding: coverage)', () => {
 });
 
 describe('writeManifest (minor finding: coverage)', () => {
+  it('writes to the correct literal filename (manifest.json)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-art-'));
+    const m = {
+      source: { url: 'test', platform: 'test', title: 'test', duration: 1, resolvedBy: 'test', status: 'ok' as const },
+      transcript: null,
+      frames: [],
+      processing: { selectedFrames: 0, candidateFrames: 0, peakRssMb: 1, selectorVersion: '1', frameMode: 'key' as const, warnings: [] },
+    };
+    const p = writeManifest(dir, m);
+    const expectedPath = join(dir, 'manifest.json');
+    expect(p).toBe(expectedPath);
+    expect(existsSync(expectedPath)).toBe(true);
+  });
   it('replaces an existing manifest file rather than duplicating it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'norma-art-'));
     const m1 = {
