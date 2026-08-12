@@ -253,6 +253,82 @@ describe('analyzeVideo -- range + captions alignment (B3)', () => {
   }, 120_000);
 });
 
+describe('analyzeVideo -- caption clamp time base on the single-instant carve-out (Fix A, task-8)', () => {
+  // src/analyze.ts:148-168 used to clamp captions whenever opts.start/end
+  // were set, regardless of whether the media itself had actually been
+  // re-based onto a 0-based clip. On the 'even'+start===end carve-out
+  // (analyze.ts:101-121) `trim()` never runs -- `clipRelative` stays false
+  // and `video`/every frame timestamp stay in ABSOLUTE time -- but the old
+  // code still clamped the captions AS IF they were clip-relative.
+  // clampSegmentsToRange(segs, 100, 100) collapses a caption spanning
+  // {98,102} to a zero-width {0,0}; attachTranscript then builds each
+  // frame's window from the frame's ABSOLUTE timestamp, which never
+  // overlaps {0,0}, so the caption was silently dropped from
+  // transcript.segments itself, not just transcriptWindow. The fix gates
+  // the clamp on `clipRelative` in addition to opts.start/opts.end.
+  it('keeps a straddling caption in absolute time on the carve-out, and still attaches it to the frame', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-clamp-carveout-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const vtt = join(dir, 'straddle.vtt');
+    writeFileSync(vtt, [
+      'WEBVTT', '',
+      '00:00:03.000 --> 00:00:07.000', 'STRADDLE_MARKER', '',
+    ].join('\n'));
+
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: { path: vtt, language: 'en' }, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+
+    // start===end -> the carve-out: clipRelative stays false, so the caption
+    // must survive UNCLAMPED, in the same absolute time base as the frame.
+    const m = await analyzeVideo('https://carveout.example/watch?v=x', {
+      frames: 'even', start: 5, end: 5, maxFrames: 1, outDir: join(dir, 'out'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames).toHaveLength(1);
+    expect(m.transcript).not.toBeNull();
+    // Assert survival with ORIGINAL timestamps, not just non-null/non-empty:
+    // the pre-fix code also produces a non-null transcript, just with the
+    // segment collapsed to {start:0,end:0} -- toBe(0)/toBeFalsy() on either
+    // bound would pass against the unfixed code, so the whole segment is
+    // compared against an independently-computed expectation instead.
+    expect(m.transcript!.segments).toEqual([{ start: 3, end: 7, text: 'STRADDLE_MARKER' }]);
+    expect(m.frames[0]!.transcriptWindow).toContain('STRADDLE_MARKER');
+  }, 120_000);
+
+  // The regression twin: an ORDINARY ranged call (clipRelative true, since
+  // start !== end takes the trim() branch instead of the carve-out) must
+  // STILL clamp. Without this, gating on `clipRelative` could regress into
+  // "never clamp" and still pass the carve-out test above.
+  it('still clamps an ordinary ranged call, where clipRelative is genuinely true', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-clamp-regression-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const vtt = join(dir, 'straddle.vtt');
+    writeFileSync(vtt, [
+      'WEBVTT', '',
+      '00:00:03.000 --> 00:00:07.000', 'STRADDLE_MARKER', '',
+    ].join('\n'));
+
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: { path: vtt, language: 'en' }, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+
+    // start !== end -> NOT the carve-out: trim() runs, clipRelative becomes
+    // true, so the caption must come back re-based onto the [2,8) clip
+    // (start:3-2=1, end:7-2=5), not left at its original absolute {3,7}.
+    const m = await analyzeVideo('https://regression.example/watch?v=x', {
+      frames: 'even', start: 2, end: 8, maxFrames: 1, outDir: join(dir, 'out'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.transcript).not.toBeNull();
+    expect(m.transcript!.segments).toEqual([{ start: 1, end: 5, text: 'STRADDLE_MARKER' }]);
+  }, 120_000);
+});
+
 describe('analyzeVideo -- documented no-throw contract (media-stage throws become failure manifests)', () => {
   it('returns an honest failure manifest (and a real peakRssMb) when normalize() throws, instead of rejecting', async () => {
     // src/mcp.ts documents analyze_video as "returns a manifest rather than

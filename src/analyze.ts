@@ -145,26 +145,23 @@ async function analyzeResolved(
       const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
       if (existsSync(track.path)) {
         let segments = parseVtt(readFileSync(track.path, 'utf8'));
-        if (opts.start !== undefined && opts.end !== undefined) {
-          // Caption files carry ABSOLUTE full-video timestamps while the
-          // media here is normally a 0-based clip (whether the resolver
-          // applied the range or trim() did just above) -- re-base them or
-          // every transcriptWindow is shifted by `start` seconds. That is
-          // NOT true on the 'even'+start===end carve-out above: there
-          // clipRelative is false, trim() never ran, and both `video` and
-          // frame timestamps stay in ABSOLUTE time.
-          //
-          // KNOWN DEFECT, deliberately deferred (not fixed here): on that
-          // carve-out this clamp still runs and uses the wrong time base.
-          // clampSegmentsToRange(segs, start, start) collapses a caption
-          // straddling `start` to a zero-width {0,0} segment; attachTranscript
-          // then builds its window from the frame's ABSOLUTE timestamp, which
-          // never overlaps {0,0}, so the caption is silently dropped --
-          // transcript.segments is corrupted on that path, not just
-          // transcriptWindow. Fix direction: gate this call on
-          // `clipRelative` (the same flag stage 5-7 already uses) instead of
-          // on `opts.start`/`opts.end` alone. Owned by the task that
-          // rewrites the MCP layer.
+        // Caption files carry ABSOLUTE full-video timestamps. `clipRelative`
+        // (declared at :99, set true at :120) is true exactly when `video`
+        // -- and therefore every frame timestamp -- has been re-based onto a
+        // 0-based clip, whether the resolver applied the range itself or
+        // stage 2's trim() did, so only then must captions be re-based too,
+        // or every transcriptWindow would be shifted by `start` seconds.
+        // Gating on `clipRelative` in addition to opts.start/opts.end (the
+        // same flag stage 5-7 already uses at :212-213) is what keeps this
+        // correct on the 'even'+start===end carve-out above: there
+        // clipRelative stays false, trim() never ran, and both `video` and
+        // every frame timestamp stay in ABSOLUTE time, so clamping here
+        // would be exactly the bug this gate exists to avoid --
+        // clampSegmentsToRange(segs, start, start) would collapse a caption
+        // straddling `start` to a zero-width {0,0} segment that no longer
+        // lines up with the frame's real (absolute) timestamp, silently
+        // corrupting transcript.segments rather than just transcriptWindow.
+        if (opts.start !== undefined && opts.end !== undefined && clipRelative) {
           segments = clampSegmentsToRange(segments, opts.start, opts.end);
         }
         transcript = {
