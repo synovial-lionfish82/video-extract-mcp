@@ -282,6 +282,72 @@ describe('analyzeVideo -- range + captions alignment (B3)', () => {
   }, 120_000);
 });
 
+describe('analyzeVideo -- platform captions beat local ASR', () => {
+  it('uses an AUTOMATIC caption track instead of transcribing locally, and never extracts audio', async () => {
+    // The policy reversal, end to end. Two independent claims, because the
+    // old behaviour would fail each for a different reason: it returned
+    // source 'asr' (auto tracks were discarded), and it paid for a full
+    // 16kHz decode pass before even consulting the tier.
+    vi.mocked(extractAudio).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-auto-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const vtt = join(dir, 'auto.en.vtt');
+    // Rolling cues, exactly as a real automatic track emits them: a ~10ms
+    // scroll cue, then a cue repeating the line before appending.
+    writeFileSync(vtt, [
+      'WEBVTT', 'Kind: captions', 'Language: en', '',
+      '00:00:01.000 --> 00:00:02.000 align:start position:0%',
+      'AUTO_ALPHA<00:00:01.500><c> tail</c>', '',
+      '00:00:02.000 --> 00:00:02.010 align:start position:0%',
+      'AUTO_ALPHA tail', '',
+      '00:00:02.010 --> 00:00:04.000 align:start position:0%',
+      'AUTO_ALPHA tail', 'AUTO_BRAVO', '',
+    ].join('\n'));
+
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: null, auto: { path: vtt, language: 'en' } },
+      languageHint: 'en', rangeApplied: false,
+    }));
+
+    const m = await analyzeVideo('https://auto.example/watch?v=x', {
+      maxFrames: 2, outDir: join(dir, 'out'),
+    });
+
+    expect(m.source.status).toBe('ok');
+    expect(m.transcript).not.toBeNull();
+    expect(m.transcript!.source).toBe('auto');
+    // Deduplicated: 'AUTO_ALPHA tail' appears in all three cues but must
+    // reach the agent once, and the scroll cue must not survive at all.
+    expect(m.transcript!.segments).toEqual([
+      { start: 1, end: 2, text: 'AUTO_ALPHA tail' },
+      { start: 2.01, end: 4, text: 'AUTO_BRAVO' },
+    ]);
+    // The efficiency half: captions made the WAV unnecessary, so it was
+    // never produced. Asserting the call, not the file, because cleanup
+    // deletes the file either way and would mask a regression.
+    expect(extractAudio).not.toHaveBeenCalled();
+  }, 120_000);
+
+  it('still falls back to local ASR when the video has no captions at all', async () => {
+    // Guards the other direction: a fix that simply stopped calling ASR
+    // would pass the test above and break every uncaptioned video.
+    vi.mocked(extractAudio).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-noc-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: null, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+    const m = await analyzeVideo('https://nocaps.example/watch?v=x', {
+      maxFrames: 2, outDir: join(dir, 'out'),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(extractAudio).toHaveBeenCalled();
+  }, 120_000);
+});
+
 describe('analyzeVideo -- caption clamp time base on the single-instant carve-out (Fix A, task-8)', () => {
   // src/analyze.ts:148-168 used to clamp captions whenever opts.start/end
   // were set, regardless of whether the media itself had actually been

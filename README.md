@@ -20,7 +20,7 @@ An LLM cannot watch a video. The usual workaround — dump every Nth frame into 
 
 `video-extract-mcp` does the selection work first:
 
-- **Transcript, honestly sourced.** Human-authored captions are used when they exist. Otherwise audio is transcribed locally with Whisper or SenseVoice. The result tells you which one you got.
+- **Transcript, honestly sourced.** The platform's own captions are used whenever the video has any — human-written first, otherwise the platform's automatic ones. Audio is transcribed locally (Whisper or SenseVoice) only for videos with no captions at all. The result tells you which you got, via `transcript.source`.
 - **Keyframes chosen, not sampled.** Scene-boundary detection, blur/quality filtering, on-screen-text novelty (subtitle-aware, so burned-in captions don't preserve redundant frames), and image-embedding similarity feed an iterative diversity-aware selector.
 - **Output goes to disk, not into your context.** The tool reply is a compact summary plus file paths. A 35-frame manifest and a full transcript don't belong in a conversation where the agent needs three numbers from them.
 - **Everything runs on your machine.** No third-party API, no upload, no key.

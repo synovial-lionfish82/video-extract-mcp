@@ -58,6 +58,11 @@ State these explicitly rather than leaving them implicit:
 
 The v2 branch (two-tool MCP surface) closed its own final review with four Critical fixes. These were adjudicated as deferred rather than fixed, and are recorded here because the branch's scratch workspace is deleted at merge.
 
+**Found on the first real URLs ever run through the engine** (while measuring platform captions against local ASR):
+
+- **A sectioned download can 403 where a full download succeeds.** yt-dlp selected an AV1+opus format for one video and YouTube refused the ranged fetch with `HTTP 403 Forbidden`, so `--download-sections` failed while the full download worked fine. The engine handled it correctly — an honest `extractor_failed`, no silent full video — but an agent asking for a range on such a video gets nothing. Worth investigating whether constraining the format selection for ranged requests avoids it.
+- **`transcript.language` is real again for captioned videos.** The known "language field is a constant" defect is a property of the local ASR path; caption tracks carry their own language tag, so a captioned video now reports `en`, `pt` and so on honestly. Only the ASR fallback still reports `auto`.
+
 **Do this one first.** `src/resolve/direct.ts`'s safe-default direction — `returnVideo === undefined` means download, which `analyze.ts` relies on because it never sets the flag — is untested at its boundary. Every test passes the flag explicitly. Mutating it to `!== true` breaks every direct/HLS URL in `analyze_video` and yet survives the entire suite. It is correct today; the coverage hole is what makes it dangerous.
 
 Other open items, in rough priority order:

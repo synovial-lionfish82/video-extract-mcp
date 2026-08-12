@@ -90,7 +90,13 @@ export function buildServer(): McpServer {
         + 'carry information (scene changes, on-screen text, visual novelty). Output is '
         + 'written to destinationPath: a manifest, the transcript, and the frame images; '
         + 'the reply is a summary plus those paths, with the transcript included inline '
-        + 'when it is short. Use start/end to analyze only part of a video -- for '
+        + "when it is short. The transcript comes from the platform's own captions "
+        + 'whenever the video has any -- human-written ones first, otherwise the '
+        + "platform's automatic ones -- and speech is transcribed locally only for "
+        + 'videos with no captions at all. transcript.source tells you which you got '
+        + '("manual", "auto" or "asr"). A captioned video is therefore much faster and '
+        + 'more accurate than an uncaptioned one, and its timings are finer-grained, '
+        + 'which makes frame-to-speech alignment tighter. Use start/end to analyze only part of a video -- for '
         + 'supported sources only that section is downloaded, and the transcript covers '
         + 'just that section (the single-instant recipe below is the one exception: '
         + 'nothing is trimmed there, so a transcript, if requested, covers the whole '

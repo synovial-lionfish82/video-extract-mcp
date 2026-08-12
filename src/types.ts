@@ -158,7 +158,6 @@ export interface Manifest {
   };
 }
 
-export type AnalyzeMode = 'fast' | 'accurate';
 
 export interface AnalyzeOptions {
   start?: number; end?: number; maxFrames?: number; transcript?: boolean;

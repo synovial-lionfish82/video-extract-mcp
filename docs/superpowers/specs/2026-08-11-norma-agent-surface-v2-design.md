@@ -87,7 +87,13 @@ analyze_video(
 
 **`maxFrames: 0` is accepted as an alias for `frames: "none"`.** The enum is the documented way to ask for a transcript alone, but a zero budget means the same thing and should not error. The description mentions both, since an agent reasoning about budgets may reach for the number before the enum.
 
-**Removed: `mode` and `fps`.** `fps` is redundant per above. `mode` only ever decided whether platform auto-captions were trusted in place of running speech recognition — far narrower than "fast versus accurate" implies, and a reviewer already flagged the description as overselling it. Accuracy bias becomes unconditional: human-authored captions are used when present, otherwise local speech recognition runs.
+**Removed: `mode` and `fps`.** `fps` is redundant per above. `mode` only ever decided whether platform auto-captions were trusted in place of running speech recognition — far narrower than "fast versus accurate" implies, and a reviewer already flagged the description as overselling it.
+
+> **Superseded — the accuracy bias was measured and reversed.** This section originally read: "human-authored captions are used when present, otherwise local speech recognition runs," treating platform auto-captions as the lower-quality option. That premise was tested against the shipped Whisper small model on three real videos and did not hold. On accented English the local output drifted out of English mid-clip and finished in another language; on sung English it emitted CJK characters and invented words; on Brazilian Portuguese it degraded into gibberish partway through. The automatic tracks were clean in all three, and carried far finer timings (57 segments versus 4 on a 65s video; 165 versus 7 on a 180s window), which matters because frames are aligned against those segments.
+>
+> The rule is now: **any platform caption beats local speech recognition** — manual first, then automatic, including machine-translated tracks. Local ASR is the fallback for videos with no captions at all, not a preferred tier. No caller-facing choice is exposed, because there is no case where local ASR is the better option when captions exist. Platform ASR runs at a scale local inference cannot match.
+>
+> This carries one hard requirement: platform automatic captions use **rolling cues**, where each cue repeats the previous one's trailing lines before appending new ones. Parsed naively they inflate roughly 3× (measured 104,652 → 33,899 characters on a real track) and repeat every line two or three times. Deduplication is part of adopting them, not a follow-up.
 
 **`language` is an optional override, not a required input.** See §4.
 

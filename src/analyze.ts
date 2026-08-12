@@ -142,20 +142,19 @@ async function analyzeResolved(
   // 4. Transcript -- STAGE 1 (ASR worker runs and exits before any vision work)
   let transcript: Transcript | null = null;
   if (opts.transcript !== false) {
-    // Fix 2 (spec §8): the WAV extraction itself is real cost (a full
-    // 16kHz decode pass over the whole source) and is only ever needed for
-    // this branch -- extracted here, inside the same gate that decides
-    // whether a transcript runs at all, rather than unconditionally in
-    // stage 3 above.
-    const { audio } = await extractAudio(media, workDir);
+    // Fix 2 (spec §8): the WAV extraction is real cost -- a full 16kHz decode
+    // pass over the whole source. It is now deferred until captions have
+    // actually been ruled out, because platform captions win whenever they
+    // exist: extracting first would pay the decode on every captioned video
+    // and then throw the result away. `audio` stays null until that happens,
+    // which is also what the cleanup below keys on.
+    let audio: string | null = null;
     try {
-      // Spec §2.2 ("Removed: mode and fps"): the caller-facing fast/accurate
-      // dial is gone and accuracy bias becomes UNCONDITIONAL -- human-authored
-      // captions win when present, otherwise local ASR runs; platform
-      // auto-captions are never substituted in. chooseCaptionTier's own
-      // 'fast' branch is untouched and still covered directly by
-      // tests/captions.test.ts; this call site just never reaches it anymore.
-      const tier = chooseCaptionTier(res.captions, 'accurate');
+      // ANY platform caption beats local speech recognition -- manual first,
+      // then automatic, with local ASR as the fallback only when the video
+      // carries no captions at all. chooseCaptionTier documents the measured
+      // comparison that reversed the original accuracy bias.
+      const tier = chooseCaptionTier(res.captions);
       if (tier !== 'asr') {
         const track = tier === 'manual' ? res.captions.manual! : res.captions.auto!;
         if (existsSync(track.path)) {
@@ -188,7 +187,10 @@ async function analyzeResolved(
           };
         }
       }
-      if (!transcript && existsSync(audio)) {
+      // No usable caption track: this is the only path that needs audio, so
+      // it is also the only path that pays for extracting it.
+      if (!transcript) ({ audio } = await extractAudio(media, workDir));
+      if (transcript === null && audio !== null && existsSync(audio)) {
         // preferredLanguage is passed through (not dropped): pickSenseVoiceLanguage
         // falls back to it when SenseVoice's own raw per-segment language signal
         // isn't usable (routing.ts; the common case on the current sherpa-onnx-node
@@ -213,7 +215,8 @@ async function analyzeResolved(
       // gate) -- an unconditional end-of-function cleanup would also mop up
       // after a REGRESSION that extracted audio unconditionally, silently
       // hiding exactly the file-existence check Fix 2's own tests rely on.
-      try { rmSync(audio, { force: true }); } catch { /* best-effort */ }
+      // Null when captions supplied the transcript and no WAV was ever made.
+      if (audio !== null) { try { rmSync(audio, { force: true }); } catch { /* best-effort */ } }
     }
   }
 
