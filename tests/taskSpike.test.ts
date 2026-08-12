@@ -273,4 +273,74 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
     const finalTask = await client.experimental.tasks.getTask(taskId);
     expect(finalTask.status).toBe('cancelled');
   });
+
+  it('(c) VETO: a store that refuses the cancelled transition blocks tasks/cancel without corrupting task state', async () => {
+    // FACT (c)-2 above was traced from shared/protocol.js's source (the
+    // CancelTaskRequestSchema handler's catch block re-wraps a non-McpError
+    // throw as `McpError(InvalidRequest, "Failed to cancel task: " +
+    // message)`) but never actually EXERCISED -- and this file's own history
+    // (deviations #1/#2) is a direct lesson that source-reading alone was
+    // twice insufficient to predict this SDK's real behavior. Task 6's
+    // HonestCancelStore design depends on a store being able to refuse a
+    // cancel, so that path gets its own empirical test here rather than
+    // resting on inference (spec §13 also names this scenario: "running
+    // task's cancel is refused and the task still completes" -- see the
+    // FACT (c)-VETO-3 comment below for how the "still completes" half was
+    // verified).
+    class VetoingTaskStore extends InMemoryTaskStore {
+      override async updateTaskStatus(
+        taskId: string,
+        status: Parameters<InMemoryTaskStore['updateTaskStatus']>[1],
+        statusMessage?: string,
+        sessionId?: string,
+      ): Promise<void> {
+        if (status === 'cancelled') {
+          throw new Error('VETO: this store refuses to cancel this task');
+        }
+        return super.updateTaskStatus(taskId, status, statusMessage, sessionId);
+      }
+    }
+    const vetoStore = new VetoingTaskStore();
+    const { server, running } = buildSpikeServer(150, vetoStore);
+    const client = await connect(server);
+    const stream = client.experimental.tasks.callToolStream({ name: 'spike_tool', arguments: { label: 'veto' } });
+    const first = await stream.next();
+    const taskId = (first.value as { task: { taskId: string } }).task.taskId;
+    await sleep(50); // executor is mid-flight
+    expect(running.size).toBe(1);
+
+    const outcome = await client.experimental.tasks.cancelTask(taskId).then(
+      (r) => ({ ok: true as const, r }), (e: unknown) => ({ ok: false as const, e: String(e) }));
+
+    // FACT (c)-VETO-1, PINNED. cancelTask() REJECTS (does not resolve) when
+    // the store's updateTaskStatus throws for the 'cancelled' transition.
+    // The client observes this as a rejected promise carrying the
+    // server-side McpError, wrapped with a "Failed to cancel task:" prefix
+    // plus the store's own thrown message.
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error('unreachable: asserted outcome.ok === false above');
+    expect(outcome.e).toContain('Failed to cancel task');
+    expect(outcome.e).toContain('VETO: this store refuses to cancel this task');
+
+    // FACT (c)-VETO-2, PINNED. The refused cancel attempt left the task's
+    // status UNCHANGED -- still 'working', not 'cancelled'. A vetoed cancel
+    // is a true no-op on task state, not a partial/inconsistent transition.
+    const afterVetoedCancel = await client.experimental.tasks.getTask(taskId);
+    expect(afterVetoedCancel.status).toBe('working');
+
+    // FACT (c)-VETO-3 is NOT asserted here (see the report's "veto path"
+    // section for why: this exact test shape, extended with a further wait
+    // plus post-cancel getTask()/getTaskResult() calls to confirm the
+    // executor completes normally afterward, triggered a reproducible but
+    // unexplained vitest-environment-only crash deep inside the SDK's own
+    // response handling -- reproduced 15/15 runs in that shape, absent in a
+    // byte-for-byte equivalent plain Node script, and absent again once
+    // those trailing calls were removed, which is what this test now is).
+    // FACT (c)-VETO-3 ("the executor's storeTaskResult then succeeds and the
+    // task completes normally") was instead confirmed via a standalone
+    // out-of-band script run directly under Node (not vitest) against this
+    // same SDK version -- see the report for the transcript. Task 6 should
+    // budget time for this if its own HonestCancelStore tests combine
+    // callToolStream() with post-cancel polling in one test.
+  });
 });
