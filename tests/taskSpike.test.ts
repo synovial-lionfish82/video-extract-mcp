@@ -9,6 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { InMemoryTaskStore } from '@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -274,19 +275,19 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
     expect(finalTask.status).toBe('cancelled');
   });
 
-  it('(c) VETO: a store that refuses the cancelled transition blocks tasks/cancel without corrupting task state', async () => {
+  it('(c) VETO: a store that refuses the cancelled transition blocks tasks/cancel, and the executor completes normally', async () => {
     // FACT (c)-2 above was traced from shared/protocol.js's source (the
     // CancelTaskRequestSchema handler's catch block re-wraps a non-McpError
     // throw as `McpError(InvalidRequest, "Failed to cancel task: " +
     // message)`) but never actually EXERCISED -- and this file's own history
-    // (deviations #1/#2) is a direct lesson that source-reading alone was
-    // twice insufficient to predict this SDK's real behavior. Task 6's
+    // (deviations #1/#2, plus the getTaskResult() footgun hit further down)
+    // is a direct lesson that source-reading alone was repeatedly
+    // insufficient to predict this SDK's real behavior. Task 6's
     // HonestCancelStore design depends on a store being able to refuse a
     // cancel, so that path gets its own empirical test here rather than
-    // resting on inference (spec §13 also names this scenario: "running
-    // task's cancel is refused and the task still completes" -- see the
-    // FACT (c)-VETO-3 comment below for how the "still completes" half was
-    // verified).
+    // resting on inference. This also verifies spec §13's own testing
+    // requirement end to end: "running task's cancel is refused and the
+    // task still completes."
     class VetoingTaskStore extends InMemoryTaskStore {
       override async updateTaskStatus(
         taskId: string,
@@ -328,19 +329,32 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
     const afterVetoedCancel = await client.experimental.tasks.getTask(taskId);
     expect(afterVetoedCancel.status).toBe('working');
 
-    // FACT (c)-VETO-3 is NOT asserted here (see the report's "veto path"
-    // section for why: this exact test shape, extended with a further wait
-    // plus post-cancel getTask()/getTaskResult() calls to confirm the
-    // executor completes normally afterward, triggered a reproducible but
-    // unexplained vitest-environment-only crash deep inside the SDK's own
-    // response handling -- reproduced 15/15 runs in that shape, absent in a
-    // byte-for-byte equivalent plain Node script, and absent again once
-    // those trailing calls were removed, which is what this test now is).
-    // FACT (c)-VETO-3 ("the executor's storeTaskResult then succeeds and the
-    // task completes normally") was instead confirmed via a standalone
-    // out-of-band script run directly under Node (not vitest) against this
-    // same SDK version -- see the report for the transcript. Task 6 should
-    // budget time for this if its own HonestCancelStore tests combine
-    // callToolStream() with post-cancel polling in one test.
+    // FACT (c)-VETO-3, PINNED. Because the store never actually reached a
+    // terminal state, the executor's own eventual storeTaskResult SUCCEEDS
+    // normally: task ends 'completed' (not 'cancelled'), and the real result
+    // is retrievable via tasks/result. This is spec §13's own testing
+    // requirement, "running task's cancel is refused and the task still
+    // completes," now verified end-to-end.
+    await sleep(150); // >= remaining workMs (150 - 50 elapsed already)
+    expect(running.size).toBe(0);
+    const finalTask = await client.experimental.tasks.getTask(taskId);
+    expect(finalTask.status).toBe('completed');
+    // SDK FOOTGUN, recorded because it cost real time to isolate: unlike
+    // getTask()/cancelTask() (which hardcode GetTaskResultSchema/
+    // CancelTaskResultSchema internally), Client.getTaskResult() and
+    // client.experimental.tasks.getTaskResult() have NO default for their
+    // resultSchema parameter (verified in shared/protocol.js and
+    // experimental/tasks/client.js) and dereference it unconditionally on
+    // any success response, deep inside zod-compat's isZ4Schema(schema) as
+    // `schema._zod`. Calling `getTaskResult(taskId)` with no second argument
+    // -- which every other typed helper on this client lets you get away
+    // with -- throws `TypeError: Cannot read properties of undefined
+    // (reading '_zod')` from inside the client's own response handler,
+    // reproduced identically under vitest AND under a plain Node script (so
+    // it is a general API footgun, not a test-environment quirk). The fix is
+    // simply to always pass a schema; CallToolResultSchema is correct here
+    // since spike_tool's task result is an ordinary tool call result.
+    const result = await client.experimental.tasks.getTaskResult(taskId, CallToolResultSchema);
+    expect((result as { content: Array<{ text: string }> }).content[0]!.text).toBe('SPIKE_RESULT:veto');
   });
 });
