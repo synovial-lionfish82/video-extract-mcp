@@ -1,8 +1,8 @@
 {
-  "name": "norma-video",
-  "version": "1.0.0",
-  "description": "",
-  "main": "dist/index.js",
+  "name": "video-extract-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that turns any video URL into a transcript and a small set of important, deduplicated keyframes — locally, with no cloud APIs. Supports YouTube, TikTok, Facebook, WeChat Channels, direct MP4/HLS and generic sites.",
+  "main": "dist/mcp.js",
   "directories": {
     "doc": "docs"
   },
@@ -15,9 +15,39 @@
     "cli": "tsx src/cli.ts",
     "matrix": "tsx scripts/matrix.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "video",
+    "transcript",
+    "transcription",
+    "keyframe",
+    "keyframes",
+    "frame-extraction",
+    "scene-detection",
+    "whisper",
+    "sense-voice",
+    "speech-recognition",
+    "asr",
+    "yt-dlp",
+    "youtube",
+    "tiktok",
+    "wechat-channels",
+    "video-understanding",
+    "ai-agent",
+    "llm-tools"
+  ],
+  "author": "yanlingLabs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yanlingLabs/video-extract-mcp.git"
+  },
+  "homepage": "https://github.com/yanlingLabs/video-extract-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/yanlingLabs/video-extract-mcp/issues"
+  },
   "type": "module",
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
