@@ -1,10 +1,27 @@
 import { mkdirSync, mkdtempSync, renameSync, copyFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, isAbsolute, resolve as resolvePath } from 'node:path';
 import type { Chapter } from '../types.js';
 import { resolve } from '../resolve/index.js';
 import { trim } from '../media/ffmpeg.js';
 import { descriptionPreview, mediaFileName, writeMetadata } from './artifacts.js';
+
+/**
+ * True when `filePath` is located inside `dir`. Fix 1 (data loss): renaming
+ * is only safe when the source is a working-directory temp resolveVideoTool
+ * itself created or a resolver wrote into the workDir it was given (direct.ts,
+ * ytdlp.ts, wechat.ts, and this module's own local-trim output all do). The
+ * bare-local-path branch (src/resolve/index.ts:29-37) instead returns the
+ * CALLER's own path verbatim -- never inside workDir -- so a rename there
+ * would move (destroy) the caller's file rather than copy it. Gating on path
+ * location, not on which resolver or branch produced the result, is the
+ * actual invariant: a future resolver returning a caller-owned path from some
+ * other branch stays safe here without needing its own special case.
+ */
+function isInside(filePath: string, dir: string): boolean {
+  const rel = relative(resolvePath(dir), resolvePath(filePath));
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
 
 export interface ResolveToolResult {
   status: string;
@@ -99,8 +116,18 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
     // Range is part of artifact identity (spec §7): a clip and a full fetch
     // coexist; re-fetching the SAME range overwrites in place.
     videoPath = join(args.destinationPath, mediaFileName(appliedStart, appliedEnd));
-    try { renameSync(sourcePath, videoPath); }
-    catch { copyFileSync(sourcePath, videoPath); }
+    // Fix 1: only rename a working-directory temp we own -- otherwise
+    // (the bare-local-path branch's caller-owned file) copy, so the source
+    // survives. Renaming a caller-owned file previously "worked" (no
+    // exception -- workDir and destinationPath are typically on the same
+    // filesystem, so renameSync just silently succeeds) while actually
+    // moving the caller's video out of its own directory.
+    if (isInside(sourcePath, workDir)) {
+      try { renameSync(sourcePath, videoPath); }
+      catch { copyFileSync(sourcePath, videoPath); }
+    } else {
+      copyFileSync(sourcePath, videoPath);
+    }
   }
 
   const clipped = appliedStart !== undefined && appliedEnd !== undefined;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { makeTestVideo, probe } from '../src/media/ffmpeg.js';
@@ -63,6 +63,31 @@ describe('resolveVideoTool', () => {
     const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
     expect(resolveMock.mock.calls[0]![1]).toMatchObject({ returnVideo: false });
     expect(r.videoPath).toBeUndefined();
+  });
+
+  it('copies rather than moves when the source is the caller\'s own file, not a working-directory temp (Fix 1: data-loss regression)', async () => {
+    // resolve()'s bare-local-path branch (src/resolve/index.ts:29-37) returns
+    // the CALLER's own path verbatim as r.filePath -- not a workDir temp.
+    // realSourceFile() builds its source in its OWN mkdtemp, structurally
+    // outside both resolveVideoTool's workDir and destinationPath -- exactly
+    // the arrangement the pre-fix suite lacked (every prior fixture's source
+    // happened to be safely renameable, so a naive renameSync never visibly
+    // broke anything). No start/end here: this must reproduce with the
+    // plainest possible returnVideo:true call, which is exactly what the
+    // brief's own repro used.
+    const source = realSourceFile();
+    const before = readFileSync(source);
+    resolveMock.mockResolvedValue(ok({ filePath: source, platform: 'local', resolvedBy: 'direct' }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: source, destinationPath: dir, returnVideo: true });
+    expect(r.status).toBe('ok');
+    expect(r.videoPath).toBeDefined();
+    expect(existsSync(r.videoPath!)).toBe(true);
+    // The regression: the source must survive at its own path, untouched --
+    // not just "some file exists there", but the SAME bytes, non-empty.
+    expect(existsSync(source)).toBe(true);
+    expect(statSync(source).size).toBeGreaterThan(0);
+    expect(readFileSync(source)).toEqual(before);
   });
 
   it('tells the agent both ways forward when it withheld the media', async () => {
