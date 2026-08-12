@@ -131,6 +131,14 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   }
 
   const clipped = appliedStart !== undefined && appliedEnd !== undefined;
+  // Fix 5: when a clip was actually produced, its duration is the applied
+  // range's own length -- NOT the original video's duration, which the
+  // `?? r.duration` fallback below would otherwise report unchanged. Without
+  // this, `resolve_video {returnVideo: true, start: 1, end: 4}` on a 6s
+  // source reported duration: 6 beside clipStart: 1, clipEnd: 4, while the
+  // saved file itself is 3 seconds long -- self-contradictory, and
+  // contradicting the reply's own "starts at 0" note below.
+  const clipDuration = clipped ? appliedEnd! - appliedStart! : undefined;
   // direct/wechat have no metadata layer (neither resolver ever populates
   // r.metadata) -- when no transfer happened (returnVideo false), their
   // top-level r.duration is an unavoidable required-by-type placeholder
@@ -160,7 +168,7 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
     descriptionPreview: descriptionPreview(r.metadata?.description ?? null),
     commentCount: r.metadata?.commentCount ?? null,
     metadataPath,
-    ...(durationKnown ? { duration: r.metadata?.duration ?? r.duration } : {}),
+    ...(durationKnown ? { duration: clipDuration ?? r.metadata?.duration ?? r.duration } : {}),
     ...(videoPath ? { videoPath } : {}),
     ...(clipped ? { clipStart: appliedStart, clipEnd: appliedEnd } : {}),
     ...(returnVideo ? {} : {

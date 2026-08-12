@@ -209,6 +209,37 @@ describe('resolveVideoTool', () => {
     expect(basename(r.videoPath!)).toBe('source_s700_e1150.mp4');
   });
 
+  it('reports the clip duration, not the original video duration, when a range was applied (Fix 5, clipped shape)', async () => {
+    // Pre-fix, duration always came from `r.metadata?.duration ?? r.duration`
+    // -- the ORIGINAL video's duration -- even once a clip was genuinely
+    // produced. ok()'s fixture has metadata.duration:100 and top-level
+    // duration:100 (a 100s source); requesting start:1,end:4 with the range
+    // genuinely applied must report duration:3 (4-1), matching the saved
+    // file's real length and the reply's own "starts at 0" note -- not 100,
+    // which would contradict both.
+    resolveMock.mockResolvedValue(ok({ rangeApplied: true, clipStart: 1, clipEnd: 4 }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({
+      url: 'https://x/v', destinationPath: dir, returnVideo: true, start: 1, end: 4,
+    });
+    expect(r.status).toBe('ok');
+    expect(r.clipStart).toBe(1);
+    expect(r.clipEnd).toBe(4);
+    expect(r.duration).toBe(3);
+  });
+
+  it('still reports the original video duration when returnVideo is true but no range was requested (Fix 5, unclipped shape)', async () => {
+    // The companion shape: an unclipped fetch must be unaffected by Fix 5 --
+    // clipDuration stays undefined (clipped is false with no start/end), so
+    // duration falls through to the original video's duration exactly as
+    // before.
+    resolveMock.mockResolvedValue(ok());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
+    expect(r.clipStart).toBeUndefined();
+    expect(r.duration).toBe(100);
+  });
+
   it('omits the clip-offset note and clip fields when returnVideo is false, even if a range is requested', async () => {
     // Complementary "not applied" case: Finding 1's local-trim fallback is
     // itself gated on returnVideo (there is no media to trim when none was
@@ -304,6 +335,11 @@ describe('resolveVideoTool', () => {
     const saved = JSON.parse(readFileSync(r.metadataPath, 'utf8'));
     expect(saved.clipStart).toBe(1);
     expect(saved.clipEnd).toBe(3);
+    // Fix 5, the OTHER clipped sub-case (local trim rather than a
+    // resolver-native range): the fixture's metadata.duration is 100 (the
+    // ok() default), so this also proves the reply's duration comes from
+    // the applied range (3-1=2), not the original video's duration.
+    expect(r.duration).toBe(2);
   });
 
   it('surfaces a local trim failure as a structured failure instead of throwing', async () => {
