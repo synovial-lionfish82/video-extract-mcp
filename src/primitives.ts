@@ -4,6 +4,17 @@ import { join } from 'node:path';
 import { run } from './util/run.js';
 import { extractFrame, probe } from './media/ffmpeg.js';
 
+// getFrame/getClip are internal helpers, not MCP tools. The v1 four-tool
+// surface (analyze_video, resolve_video, get_frame, get_clip) collapsed to
+// two (resolve_video, analyze_video) in the v2 rewrite; src/mcp.ts no
+// longer imports this module, and nothing else in src/ calls into it
+// either -- both functions are exercised only by tests/primitives.test.ts
+// and tests/analyze.integration.test.ts. They stay: they implement the
+// coarse-to-fine single-frame/dense-window primitives spec §18 describes,
+// and a future surface change may need them again. Do not delete them as
+// dead code, and do not re-expose them as MCP tools without revisiting
+// that decision first.
+
 /**
  * Extract a single frame at `timestamp`.
  *

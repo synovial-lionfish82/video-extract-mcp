@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
+import { join } from 'node:path';
 import type { AnalyzeOptions, Manifest, ResolveStatus } from '../src/types.js';
 import { isMainModule } from '../src/util/entry.js';
 
@@ -320,7 +321,33 @@ export async function execCase(
     // failure and surfaces as an honest FAIL row with a diagnostic message,
     // not a crash with no document at all.
     const analyze = opts.analyze ?? (await (opts.resolveAnalyze ?? getRealAnalyze)());
-    const result = await withTimeout(analyze(c.url, { maxFrames: 20, ...c.opts }), opts.timeoutMs);
+    // Per-case destination, keyed by case name so a re-run overwrites in
+    // place rather than scattering a fresh directory (and a fresh copy of
+    // every candidate/frame image) per invocation -- gitignored (/scratch/),
+    // never created for a case that skips (this string is pure, and
+    // analyzeVideo itself is what mkdirSync's it -- src/analyze.ts:75 --
+    // only once a case actually runs). Safe to reuse across runs: unlike
+    // primitives.ts's getClip (before its own fix), neither extractCandidates
+    // (src/media/candidates.ts) nor sampleEven (src/vision/even.ts) build
+    // their return value by readdir-scanning outDir -- both return exactly
+    // what their own loop produced this call, so a stale file left over from
+    // an earlier, larger-budget run cannot inflate this run's counts.
+    //
+    // Both AnalyzeOptions fields that name a destination are set, but only
+    // one is real here: `outDir` is what analyzeVideo actually reads
+    // (src/analyze.ts:74, the mkdtempSync fallback it replaces). `destinationPath`
+    // is inert at this layer -- analyzeVideo never reads it, only
+    // analyzeVideoTool (src/agent/analyzeTool.ts, the MCP-facing wrapper)
+    // does, and this runner deliberately calls analyzeVideo directly (see
+    // the header comment: this proves the pipeline, not the MCP schema
+    // layer). Set anyway since it is a real, documented AnalyzeOptions field
+    // and leaving it unset relies on every case implicitly agreeing to skip
+    // it.
+    const outDir = join('scratch', 'matrix', c.name);
+    const result = await withTimeout(
+      analyze(c.url, { maxFrames: 20, destinationPath: outDir, outDir, ...c.opts }),
+      opts.timeoutMs,
+    );
     if (result === TIMEOUT_SENTINEL) return { kind: 'timeout', ms: opts.timeoutMs };
     return {
       kind: 'ran',
