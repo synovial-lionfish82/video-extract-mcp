@@ -4,7 +4,7 @@
 // rests on (spec §12.1). These were verified empirically against the pinned
 // SDK 1.30.0 before any production code was written; if an SDK upgrade
 // changes any of them, these tests are the tripwire.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -126,8 +126,23 @@ class RecordingTaskStore extends InMemoryTaskStore {
 }
 
 describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
+  // Minor cleanup (code review finding): every InMemoryTaskStore.createTask()
+  // call below uses ttl: 60_000, which schedules a real setTimeout 60s out
+  // to sweep the task. Nothing in these tests waits that long, so left
+  // alone each test leaks one 60s timer past its own completion. Not a
+  // correctness bug (vitest tears the process down at the end of the run
+  // regardless), just hygiene -- every store used by a test is pushed here
+  // and swept via InMemoryTaskStore's own cleanup() (clears its timers and
+  // its in-memory task map) once the test finishes.
+  let storesToCleanUp: InMemoryTaskStore[] = [];
+  afterEach(() => {
+    for (const s of storesToCleanUp) s.cleanup();
+    storesToCleanUp = [];
+  });
+
   it('(a) LINCHPIN: a plain callTool() on a task-registered optional tool returns a normal result', async () => {
-    const { server } = buildSpikeServer(30);
+    const { server, store } = buildSpikeServer(30);
+    storesToCleanUp.push(store);
     const client = await connect(server);
     const r = (await client.callTool({ name: 'spike_tool', arguments: { label: 'plain' } })) as {
       content: Array<{ type: string; text: string }>; isError?: boolean;
@@ -137,17 +152,21 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
   });
 
   it('(b) callToolStream surfaces taskCreated, status updates, and the final result', async () => {
-    const { server } = buildSpikeServer(30);
+    const { server, store } = buildSpikeServer(30);
+    storesToCleanUp.push(store);
     const client = await connect(server);
     const seen: string[] = [];
     let finalText = '';
+    const start = Date.now();
     for await (const msg of client.experimental.tasks.callToolStream({
       name: 'spike_tool', arguments: { label: 'task' },
     }) as AsyncGenerator<{ type: string; task?: { status: string }; result?: { content: Array<{ text: string }> } }>) {
       seen.push(msg.type === 'taskStatus' ? `taskStatus:${msg.task!.status}` : msg.type);
       if (msg.type === 'result') finalText = msg.result!.content[0]!.text;
     }
-    expect(seen[0]).toBe('taskCreated');
+    const elapsedMs = Date.now() - start;
+    // seen[0] === 'taskCreated' is checked as part of the full-sequence
+    // toEqual below (code review: a standalone check here was redundant).
     expect(finalText).toBe('SPIKE_RESULT:task');
 
     // FACT (b), PINNED. Observed sequence, deterministic given the ~33x
@@ -191,10 +210,103 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
     // visibility is delayed by up to one pollInterval unless the task sets a
     // shorter one via `createTask({ pollInterval })`.
     expect(seen).toEqual(['taskCreated', 'taskStatus:working', 'taskStatus:completed', 'result']);
+
+    // FLAKE-IMMUNE ENFORCEMENT of "poll, not push" (code review finding on
+    // this test, spec §12.1 review round 2): the sequence-only check above
+    // pins message ORDER but not the MECHANISM -- it would plausibly still
+    // pass, just much faster, under a hypothetical SDK reimplementation
+    // that forwards the server's genuine notifications/tasks/status push
+    // directly instead of polling, since push delivery preserves the same
+    // taskCreated/taskStatus/taskStatus/result order. The comment above is
+    // accurate but is not itself a tripwire; this bound is. It asserts the
+    // stream took at least ~one default pollInterval (900ms, 100ms under
+    // the true 1000ms, for scheduling headroom) end to end -- which fails
+    // if either (a) taskStatus delivery switches from polling to push, or
+    // (b) the default pollInterval drops well below 1s -- both genuine
+    // positives for an SDK upgrade breaking this design's assumption, which
+    // is exactly what this permanent regression test exists to catch (see
+    // the file header). It cannot flake low under system load: `setTimeout`
+    // never fires early, only late, so real load can only push elapsedMs
+    // higher, never below the bound.
+    expect(elapsedMs).toBeGreaterThanOrEqual(900);
+  });
+
+  it('(b) COALESCING: two rapid successive updateTaskStatus calls are not both independently observed', async () => {
+    // Direct empirical confirmation of the "coalesced between polls" claim
+    // in the fact (b) comment above -- previously stated as a logical
+    // consequence of the polling mechanism but not itself checked by any
+    // assertion (code review finding, optional half of the same finding as
+    // the elapsed-time bound above). Robust BY CONSTRUCTION, not by timing
+    // luck -- the two writes below have no real timer between them (two
+    // back-to-back awaited store calls only), so they complete in well
+    // under a millisecond of wall-clock time with no `setTimeout` involved
+    // at all. Exactly ONE poll can possibly land during that whole window:
+    // requestStream()'s first poll (shared/protocol.js), which fires
+    // immediately with no wait after 'taskCreated'. The *second* poll is
+    // gated behind a genuine 1000ms `setTimeout` that only starts counting
+    // after the first poll's own request/response round trip resolves --
+    // so it is structurally impossible, independent of system load or
+    // scheduling jitter, for both rapid writes to ever be caught by two
+    // separate polls. This is what makes the assertion below flake-immune:
+    // it does not depend on which write the single possible poll happens to
+    // observe, only on the fact that at most one of the two is ever seen.
+    const store = new InMemoryTaskStore();
+    storesToCleanUp.push(store);
+    const server = new McpServer(
+      { name: 'spike-coalesce', version: '0.0.1' },
+      { taskStore: store, capabilities: { tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } } } },
+    );
+    server.experimental.tasks.registerToolTask(
+      'coalesce_tool',
+      { description: 'coalesce spike', inputSchema: { label: z.string() }, execution: { taskSupport: 'optional' } },
+      {
+        createTask: async (args, extra) => {
+          const task = await extra.taskStore.createTask({ ttl: 60_000 });
+          void (async () => {
+            // No sleep/setTimeout between these two -- see the comment above.
+            await extra.taskStore.updateTaskStatus(task.taskId, 'working', 'burst-A');
+            await extra.taskStore.updateTaskStatus(task.taskId, 'working', 'burst-B');
+            await sleep(100); // comfortably under the 1000ms default pollInterval
+            await extra.taskStore.storeTaskResult(task.taskId, 'completed', {
+              content: [{ type: 'text', text: `SPIKE_RESULT:${args.label}` }],
+            });
+          })();
+          return { task };
+        },
+        getTask: async (_args, extra) => extra.taskStore.getTask(extra.taskId),
+        getTaskResult: async (_args, extra) =>
+          (await extra.taskStore.getTaskResult(extra.taskId)) as import('@modelcontextprotocol/sdk/types.js').CallToolResult,
+      },
+    );
+    const client = await connect(server);
+
+    const workingStatusMessages: Array<string | undefined> = [];
+    for await (const msg of client.experimental.tasks.callToolStream({
+      name: 'coalesce_tool', arguments: { label: 'coalesce' },
+    }) as AsyncGenerator<{ type: string; task?: { status: string; statusMessage?: string } }>) {
+      if (msg.type === 'taskStatus' && msg.task!.status === 'working') {
+        workingStatusMessages.push(msg.task!.statusMessage);
+      }
+    }
+
+    // COALESCING, PINNED (directly observed, not inferred from the polling
+    // mechanism alone): the executor made TWO distinct rapid writes
+    // ('burst-A' then 'burst-B'), but the poll-based stream never yields
+    // more than one 'working' taskStatus message here -- asserted as `<=1`,
+    // per the review's flake-immunity requirement, rather than an exact
+    // count, since which single value (or, in principle, neither, if the
+    // one possible poll raced even the first write) the lone poll opportunity
+    // happens to catch is not itself load-bearing -- only that BOTH writes
+    // are never independently observed is.
+    expect(workingStatusMessages.length).toBeLessThanOrEqual(1);
+    if (workingStatusMessages.length === 1) {
+      expect(['burst-A', 'burst-B']).toContain(workingStatusMessages[0]);
+    }
   });
 
   it('(c) cancellation routing: cancelTask on a running task -- observe and pin', async () => {
     const recordingStore = new RecordingTaskStore();
+    storesToCleanUp.push(recordingStore);
     const { server, running, executorErrors } = buildSpikeServer(300, recordingStore);
     const client = await connect(server);
     const stream = client.experimental.tasks.callToolStream({ name: 'spike_tool', arguments: { label: 'x' } });
@@ -302,6 +414,7 @@ describe('SDK task spike (spec §12.1) -- the linchpin facts', () => {
       }
     }
     const vetoStore = new VetoingTaskStore();
+    storesToCleanUp.push(vetoStore);
     const { server, running } = buildSpikeServer(150, vetoStore);
     const client = await connect(server);
     const stream = client.experimental.tasks.callToolStream({ name: 'spike_tool', arguments: { label: 'veto' } });
