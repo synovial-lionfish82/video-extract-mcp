@@ -675,3 +675,37 @@ describe('buildManifest', () => {
     expect(m.source.filePath).toBe('/work/dir/work.mp4');
   });
 });
+
+describe('analyzeVideo -- onStage progress seams (spec §7)', () => {
+  it('emits resolving -> transcribing -> frames for a full default run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-stage-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: null, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+    const stages: string[] = [];
+    const m = await analyzeVideo('https://stage.example/v', {
+      maxFrames: 2, outDir: join(dir, 'out'), onStage: (s) => stages.push(s),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(stages).toEqual(['resolving', 'transcribing', 'frames']);
+  }, 120_000);
+
+  it('emits only the stages that actually run: transcript off + frames none', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-stage2-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: null, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+    const stages: string[] = [];
+    const m = await analyzeVideo('https://stage.example/v2', {
+      frames: 'none', transcript: false, outDir: join(dir, 'out'), onStage: (s) => stages.push(s),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(stages).toEqual(['resolving']);   // no fabricated stages for skipped work (§7/§8)
+  }, 120_000);
+});

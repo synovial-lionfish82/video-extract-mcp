@@ -159,6 +159,9 @@ export interface Manifest {
 }
 
 
+/** Progress seams analyzeVideo reports through AnalyzeOptions.onStage (spec §7). */
+export type AnalyzeStage = 'resolving' | 'transcribing' | 'frames';
+
 export interface AnalyzeOptions {
   start?: number; end?: number; maxFrames?: number; transcript?: boolean;
   frames?: FrameMode;
@@ -167,4 +170,7 @@ export interface AnalyzeOptions {
   preferredLanguage?: string;
   destinationPath?: string;
   outDir?: string;
+  /** Called at pipeline seams; only for stages that actually run. Failures in
+   *  the callback are the caller's own problem -- not caught here. */
+  onStage?: (stage: AnalyzeStage) => void;
 }

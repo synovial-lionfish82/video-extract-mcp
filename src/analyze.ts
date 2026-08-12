@@ -44,6 +44,10 @@ export async function analyzeVideo(url: string, opts: AnalyzeOptions = {}): Prom
   // reach the failure manifest.
   const warnings: string[] = [];
   try {
+    // Progress seam (spec §7): about to resolve. First statement of the try
+    // block, before analyzeResolved runs anything, so a caller sees it even
+    // if resolution itself fails.
+    opts.onStage?.('resolving');
     return await analyzeResolved(url, opts, frameMode, rss, src, warnings);
   } catch (e) {
     // The documented contract (src/mcp.ts): analyze_video RETURNS a manifest
@@ -142,6 +146,8 @@ async function analyzeResolved(
   // 4. Transcript -- STAGE 1 (ASR worker runs and exits before any vision work)
   let transcript: Transcript | null = null;
   if (opts.transcript !== false) {
+    // Progress seam (spec §7): the transcript stage is actually about to run.
+    opts.onStage?.('transcribing');
     // Fix 2 (spec §8): the WAV extraction is real cost -- a full 16kHz decode
     // pass over the whole source. It is now deferred until captions have
     // actually been ruled out, because platform captions win whenever they
@@ -230,6 +236,9 @@ async function analyzeResolved(
   let candidateCount = 0;
 
   if (frameMode === 'even') {
+    // Progress seam (spec §7): emitted here, not above the dispatch, so
+    // frameMode === 'none' -- which reaches neither branch -- emits nothing.
+    opts.onStage?.('frames');
     // Fix 4(b): a half-specified range must be genuinely ignored here too,
     // matching stage 2's own trim gate above and the documented "either
     // alone is ignored" claim (src/mcp.ts) -- both bounds or neither.
@@ -273,6 +282,9 @@ async function analyzeResolved(
       ocrContent: null, transcriptWindow: null, nearestSelectedSimilarity: 0,
     }));
   } else if (frameMode === 'key') {
+    // Progress seam (spec §7): mirrors the 'even' branch above -- same
+    // reasoning, so 'none' still emits nothing.
+    opts.onStage?.('frames');
     // 5. Candidates -> quality filter -> OCR -> text novelty. No resident
     // model in this block (scene detection/candidates/quality/OCR are all
     // subprocess or cheap-native), but two of its steps can genuinely throw:
