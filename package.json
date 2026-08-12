@@ -1,8 +1,23 @@
 {
-  "name": "video-extract-mcp",
+  "name": "@yanlinglabs/video-extract-mcp",
   "version": "0.1.0",
   "description": "MCP server that turns any video URL into a transcript and a small set of important, deduplicated keyframes — locally, with no cloud APIs. Supports YouTube, TikTok, Facebook, WeChat Channels, direct MP4/HLS and generic sites.",
   "main": "dist/mcp.js",
+  "bin": {
+    "video-extract-mcp": "dist/mcp.js",
+    "video-extract": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "scripts/fetch-models.sh"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "directories": {
     "doc": "docs"
   },
@@ -13,7 +28,8 @@
     "typecheck": "npm run build && tsc --noEmit -p tsconfig.typecheck.json",
     "preflight": "tsx scripts/preflight.ts",
     "cli": "npm run build && node dist/cli.js",
-    "matrix": "tsx scripts/matrix.ts"
+    "matrix": "tsx scripts/matrix.ts",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "mcp",
@@ -48,7 +64,6 @@
   "bugs": {
     "url": "https://github.com/yanlingLabs/video-extract-mcp/issues"
   },
-  "type": "module",
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",

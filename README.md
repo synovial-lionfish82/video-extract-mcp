@@ -9,7 +9,7 @@ Built for AI agents. Two MCP tools, no cloud, no API keys, no Python.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A526-brightgreen.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-440%20passing-success.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-451%20passing-success.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-server-orange.svg)](https://modelcontextprotocol.io)
 
 ---
@@ -27,40 +27,60 @@ An LLM cannot watch a video. The usual workaround — dump every Nth frame into 
 
 ## Quick start
 
-```bash
-git clone https://github.com/yanlingLabs/video-extract-mcp.git
-cd video-extract-mcp
-npm install
-npm run build
+Install the system binaries first — these can't come from npm:
 
-# System binaries (macOS shown; use your package manager elsewhere)
+```bash
+# macOS; use your package manager elsewhere
 brew install ffmpeg yt-dlp tesseract tesseract-lang
-
-# Speech models, ~1.5 GB, one time
-./scripts/fetch-models.sh
-
-# Confirm the environment is sane
-npm run preflight
 ```
 
-Then register it with your MCP client. For Claude Code:
+Then point your MCP client at the package. For Claude Code:
 
 ```bash
-claude mcp add video-extract -- node /absolute/path/to/video-extract-mcp/dist/mcp.js
+claude mcp add video-extract -- npx -y @yanlinglabs/video-extract-mcp
 ```
 
-Or add it to any MCP client's config directly:
+Or in any MCP client's config:
 
 ```json
 {
   "mcpServers": {
     "video-extract": {
-      "command": "node",
-      "args": ["/absolute/path/to/video-extract-mcp/dist/mcp.js"]
+      "command": "npx",
+      "args": ["-y", "@yanlinglabs/video-extract-mcp"]
     }
   }
 }
 ```
+
+That is enough for any video that has captions — which, thanks to the caption-first transcript policy, is most of them. The vision model downloads itself on first use.
+
+**Speech models are only needed for videos with no captions at all.** They are ~1.5 GB, so they are not bundled. Fetch them when you want that fallback:
+
+```bash
+npx -y @yanlinglabs/video-extract-mcp --help   # installs the package
+curl -fsSL https://raw.githubusercontent.com/yanlingLabs/video-extract-mcp/main/scripts/fetch-models.sh \
+  | bash -s -- ~/.cache/video-extract-mcp/models
+```
+
+`~/.cache/video-extract-mcp/models` is where the tool looks by default. Override with `VIDEO_EXTRACT_MODELS_DIR`. Without them, an uncaptioned video still returns frames and records a warning explaining the transcript is missing — it degrades rather than fails.
+
+### From source (contributors)
+
+```bash
+git clone https://github.com/yanlingLabs/video-extract-mcp.git
+cd video-extract-mcp
+npm install && npm run build
+./scripts/fetch-models.sh    # into ./models, which takes precedence when present
+npm run preflight            # verifies ffmpeg / ffprobe / yt-dlp / tesseract
+```
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `VIDEO_EXTRACT_MODELS_DIR` | Where speech models live. Defaults to `./models` when that exists, else `~/.cache/video-extract-mcp/models`. |
+| `VIDEO_EXTRACT_WECHAT_COOKIE` | A yuanbao session cookie, required only for WeChat Channels links. |
 
 ## Three ways to use it
 
@@ -90,7 +110,7 @@ node dist/cli.js "<url>" --max-frames 10 | jq '.transcript.source'
 **As a library**, if you want the pipeline without an agent in the loop:
 
 ```ts
-import { analyzeVideo } from 'video-extract-mcp/dist/analyze.js';
+import { analyzeVideo } from '@yanlinglabs/video-extract-mcp/dist/analyze.js';
 
 const manifest = await analyzeVideo('https://youtube.com/watch?v=...', {
   start: 30, end: 90, frames: 'key', maxFrames: 12, outDir: './output',
@@ -163,7 +183,7 @@ Selection is iterative and diversity-aware (maximal marginal relevance), not a f
 
 Genuinely exercised code paths: **YouTube, TikTok, Facebook and Reels, X/Twitter, Instagram, Twitch, Vimeo, Reddit, WeChat Channels**, and direct `.mp4`/`.m3u8` URLs. Many other sites work through yt-dlp's generic extraction. Some will not, and those return a clear failure status rather than throwing.
 
-WeChat Channels (视频号) support is worth calling out: it resolves **headlessly**, through a documented request sequence, with no browser automation and no MITM proxy. It needs a `NORMA_WECHAT_COOKIE` environment variable. The protocol was derived clean-room from Tencent's own served frontend and authenticated probes — deliberately *without* consulting existing implementations, since the well-known one is MIT + Commons Clause and would have restricted commercial use.
+WeChat Channels (视频号) support is worth calling out: it resolves **headlessly**, through a documented request sequence, with no browser automation and no MITM proxy. It needs a `VIDEO_EXTRACT_WECHAT_COOKIE` environment variable. The protocol was derived clean-room from Tencent's own served frontend and authenticated probes — deliberately *without* consulting existing implementations, since the well-known one is MIT + Commons Clause and would have restricted commercial use.
 
 ## Design constraints worth knowing
 

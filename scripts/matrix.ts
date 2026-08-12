@@ -23,7 +23,7 @@ export interface MatrixCase {
 }
 
 // Fill in concrete URLs before the first real run; one case per spec §20 row.
-// The WeChat row additionally requires NORMA_WECHAT_COOKIE -- deliberately
+// The WeChat row additionally requires VIDEO_EXTRACT_WECHAT_COOKIE -- deliberately
 // left unset until the clean-room resolver (experiments/wechat-clean-room/)
 // is validated, so that row stays an honest SKIP rather than a false FAIL
 // against a resolver everyone already knows isn't ready.
@@ -35,7 +35,7 @@ export const CASES: MatrixCase[] = [
   { name: 'login-walled', url: process.env.M_AUTH ?? '', expectStatus: 'auth_required', proves: 'clean auth_required' },
   { name: 'direct-mp4', url: process.env.M_MP4 ?? '', expectStatus: 'ok', proves: 'DirectMediaResolver' },
   { name: 'generic-embed', url: process.env.M_EMBED ?? '', expectStatus: 'ok', proves: 'yt-dlp generic extraction' },
-  { name: 'wechat-share', url: process.env.M_WECHAT ?? '', expectStatus: 'ok', proves: 'headless WeChat + SenseVoice', requiresEnv: ['NORMA_WECHAT_COOKIE'] },
+  { name: 'wechat-share', url: process.env.M_WECHAT ?? '', expectStatus: 'ok', proves: 'headless WeChat + SenseVoice', requiresEnv: ['VIDEO_EXTRACT_WECHAT_COOKIE'] },
   { name: 'chinese-video', url: process.env.M_ZH ?? '', opts: { preferredLanguage: 'zh' }, expectStatus: 'ok', proves: 'SenseVoice routing' },
   { name: 'drm-page', url: process.env.M_DRM ?? '', expectStatus: 'unsupported', proves: 'clean unsupported/drm_protected' },
   { name: 'range-23-60', url: process.env.M_YT_MANUAL ?? '', opts: { start: 23, end: 60 }, expectStatus: 'ok', proves: 'range slice + fallback' },
@@ -195,7 +195,7 @@ export function renderDocument(results: MatrixResult[], opts: { generatedAt?: Da
       '> against a real URL. This document proves nothing yet about the engine\'s',
       '> network-facing behaviour -- it only confirms the runner itself completes',
       '> cleanly with no configuration. Set the `M_*` environment variables (and,',
-      '> for the WeChat row, `NORMA_WECHAT_COOKIE`) and re-run `npm run matrix`.',
+      '> for the WeChat row, `VIDEO_EXTRACT_WECHAT_COOKIE`) and re-run `npm run matrix`.',
     );
   }
 

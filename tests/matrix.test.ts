@@ -58,25 +58,25 @@ describe('skipReason', () => {
 
   it('flags a missing required env var even when the URL is set (WeChat row)', () => {
     // Bug this catches: the WeChat row running against a resolver that needs
-    // NORMA_WECHAT_COOKIE, without it, and coming back auth_required -- which
+    // VIDEO_EXTRACT_WECHAT_COOKIE, without it, and coming back auth_required -- which
     // would then be scored as a plain FAIL instead of an honest SKIP.
-    vi.stubEnv('NORMA_WECHAT_COOKIE', '');
-    const reason = skipReason({ ...CASE, requiresEnv: ['NORMA_WECHAT_COOKIE'] });
-    expect(reason).toMatch(/NORMA_WECHAT_COOKIE/);
+    vi.stubEnv('VIDEO_EXTRACT_WECHAT_COOKIE', '');
+    const reason = skipReason({ ...CASE, requiresEnv: ['VIDEO_EXTRACT_WECHAT_COOKIE'] });
+    expect(reason).toMatch(/VIDEO_EXTRACT_WECHAT_COOKIE/);
     vi.unstubAllEnvs();
   });
 
   it('treats a whitespace-only required env var as missing (mirrors wechat.ts getCredential)', () => {
-    vi.stubEnv('NORMA_WECHAT_COOKIE', '   ');
-    expect(skipReason({ ...CASE, requiresEnv: ['NORMA_WECHAT_COOKIE'] })).not.toBeNull();
+    vi.stubEnv('VIDEO_EXTRACT_WECHAT_COOKIE', '   ');
+    expect(skipReason({ ...CASE, requiresEnv: ['VIDEO_EXTRACT_WECHAT_COOKIE'] })).not.toBeNull();
     vi.unstubAllEnvs();
   });
 
   it('returns null (runnable) when the URL and all required env vars are present', () => {
     // Bug this catches: an over-eager skip check that never lets a fully
     // configured case run at all.
-    vi.stubEnv('NORMA_WECHAT_COOKIE', 'real-cookie-value');
-    expect(skipReason({ ...CASE, requiresEnv: ['NORMA_WECHAT_COOKIE'] })).toBeNull();
+    vi.stubEnv('VIDEO_EXTRACT_WECHAT_COOKIE', 'real-cookie-value');
+    expect(skipReason({ ...CASE, requiresEnv: ['VIDEO_EXTRACT_WECHAT_COOKIE'] })).toBeNull();
     vi.unstubAllEnvs();
   });
 });
@@ -493,7 +493,7 @@ describe('runMatrix -- real subprocess, isolated copy with no dist/ (Finding 1, 
     // copy the real scripts/matrix.ts into an isolated temp directory that
     // has neither dist/ nor src/ (matrix.ts's only src/ import is `import
     // type`, fully erased at transpile time, so it is never touched at
-    // runtime), run it as a real subprocess with no M_*/NORMA_* env vars,
+    // runtime), run it as a real subprocess with no M_*/VIDEO_EXTRACT_* env vars,
     // and observe the result. dist/ does not exist there -- genuinely
     // absent, not simulated -- so getRealAnalyze()'s dynamic import would
     // fail exactly as on a fresh clone, IF it were ever reached. Runs
@@ -526,7 +526,7 @@ describe('runMatrix -- real subprocess, isolated copy with no dist/ (Finding 1, 
 
     const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(cleanEnv)) {
-      if (/^(M_|NORMA_)/.test(k)) delete cleanEnv[k];
+      if (/^(M_|VIDEO_EXTRACT_|NORMA_)/.test(k)) delete cleanEnv[k];
     }
 
     const tsxBin = join(process.cwd(), 'node_modules', '.bin', 'tsx');

@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { run } from '../util/run.js';
+import { resolveModelsDir } from '../util/models.js';
 import type { Transcript } from '../types.js';
 import type { AsrEngine } from './routing.js';
 
@@ -13,7 +14,7 @@ export async function transcribeAudio(
   // "asr failed" warning rather than an error.
   const worker = join(here, 'asrWorker.js');
   const engine = opts.engine ?? 'whisper';
-  const modelsDir = opts.modelsDir ?? 'models';
+  const modelsDir = opts.modelsDir ?? resolveModelsDir();
 
   // preferredLanguage is an optional 4th positional CLI arg -- appended only
   // when supplied, never as a literal "undefined" string, since run() joins

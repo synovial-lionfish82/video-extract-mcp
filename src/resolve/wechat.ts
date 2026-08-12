@@ -40,7 +40,11 @@ const INVALID_HEADER_VALUE_RE = /[\x00-\x08\x0A-\x1F\x7F]/;
 
 export function getCredential(): string | null {
   // Injected only; never hardcoded, never logged (spec §7.2).
-  const raw = process.env.NORMA_WECHAT_COOKIE?.trim();
+  // NORMA_WECHAT_COOKIE is the pre-publication name, still accepted so an
+  // existing local setup keeps working; the package is published as
+  // video-extract-mcp and nothing user-facing is called Norma, so a single
+  // VIDEO_EXTRACT_ prefix is what gets documented.
+  const raw = (process.env.VIDEO_EXTRACT_WECHAT_COOKIE ?? process.env.NORMA_WECHAT_COOKIE)?.trim();
   if (!raw) return null;
   if (INVALID_HEADER_VALUE_RE.test(raw)) return null; // corrupted credential; treat as absent
   return raw;
