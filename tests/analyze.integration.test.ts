@@ -45,7 +45,17 @@ vi.mock('../dist/resolve/index.js', async (importOriginal) => {
 });
 vi.mock('../dist/media/ffmpeg.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../dist/media/ffmpeg.js')>();
-  return { ...real, normalize: vi.fn(real.normalize) };
+  // Fix 2 split normalize() into normalizeVideo()/extractAudio(); analyze.ts
+  // now calls those directly (normalize() itself has no callers left in
+  // src/). Both are wrapped -- not just normalize -- so a test overriding
+  // either half's implementation (e.g. to simulate a throw) actually
+  // intercepts the call analyze.ts makes.
+  return {
+    ...real,
+    normalize: vi.fn(real.normalize),
+    normalizeVideo: vi.fn(real.normalizeVideo),
+    extractAudio: vi.fn(real.extractAudio),
+  };
 });
 vi.mock('../dist/vision/ocr.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../dist/vision/ocr.js')>();
@@ -62,7 +72,7 @@ const { buildManifest } = await import('../dist/manifest.js');
 const { embedImages } = await import('../dist/vision/embed.js');
 const { filterCandidates } = await import('../dist/vision/quality.js');
 const { resolve } = await import('../dist/resolve/index.js');
-const { normalize } = await import('../dist/media/ffmpeg.js');
+const { normalizeVideo, extractAudio } = await import('../dist/media/ffmpeg.js');
 const { ocrFrame } = await import('../dist/vision/ocr.js');
 
 /** A deterministic, distinct, already-unit-norm 768-dim vector per index. */
@@ -330,20 +340,26 @@ describe('analyzeVideo -- caption clamp time base on the single-instant carve-ou
 });
 
 describe('analyzeVideo -- documented no-throw contract (media-stage throws become failure manifests)', () => {
-  it('returns an honest failure manifest (and a real peakRssMb) when normalize() throws, instead of rejecting', async () => {
+  it('returns an honest failure manifest (and a real peakRssMb) when normalizeVideo() throws, instead of rejecting', async () => {
     // src/mcp.ts documents analyze_video as "returns a manifest rather than
     // throwing". Pre-fix, a throw from normalize/probe/trim rejected
     // analyzeVideo AND skipped rss.stop(), leaking the 250ms ps -A sampler
     // permanently in a long-lived MCP server -- once per failed call.
+    //
+    // Fix 2 split normalize() into normalizeVideo()/extractAudio(), and
+    // analyze.ts now calls normalizeVideo() only for frameMode 'key' (the
+    // default, which this maxFrames:2 request takes) -- mocking `normalize`
+    // itself here would no longer intercept anything analyze.ts actually
+    // calls, and this test would silently stop proving what its name claims.
     const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-nothrow-'));
     const v = await makeTestVideo(join(dir, 'v.mp4'), 6);
-    vi.mocked(normalize).mockImplementationOnce(async () => {
+    vi.mocked(normalizeVideo).mockImplementationOnce(async () => {
       throw new Error('SIMULATED: normalize exploded');
     });
 
     // No try/catch on purpose: a rejection here IS the pre-fix failure mode.
     const m = await analyzeVideo(v, { maxFrames: 2, transcript: false, outDir: join(dir, 'out') });
-    expect(normalize).toHaveBeenCalled();
+    expect(normalizeVideo).toHaveBeenCalled();
     expect(m.source.status).toBe('extractor_failed');
     expect(m.source.reason).toContain('SIMULATED: normalize exploded');
     expect(m.frames).toEqual([]);
@@ -351,6 +367,24 @@ describe('analyzeVideo -- documented no-throw contract (media-stage throws becom
     expect(m.source.platform).toBe('local');
     expect(m.source.resolvedBy).toBe('direct');
     // rss.stop() ran (the tracker was started, so the peak is a real number).
+    expect(m.processing.peakRssMb).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('returns an honest failure manifest when extractAudio() throws, instead of rejecting', async () => {
+    // The other half of the Fix 2 split, tested independently: normalizeVideo
+    // throwing is covered above. frames:'none' keeps normalizeVideo out of
+    // the picture entirely (never called), isolating this to the
+    // audio-extraction half specifically -- transcript defaults to true, so
+    // extractAudio() still runs even with no frames requested at all.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-audiothrow-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 6);
+    vi.mocked(extractAudio).mockImplementationOnce(async () => {
+      throw new Error('SIMULATED: extractAudio exploded');
+    });
+    const m = await analyzeVideo(v, { frames: 'none', outDir: join(dir, 'out') });
+    expect(extractAudio).toHaveBeenCalled();
+    expect(m.source.status).toBe('extractor_failed');
+    expect(m.source.reason).toContain('SIMULATED: extractAudio exploded');
     expect(m.processing.peakRssMb).toBeGreaterThan(0);
   }, 60_000);
 });

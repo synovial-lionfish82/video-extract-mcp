@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { AnalyzeOptions, Manifest, Transcript, Candidate, SelectedFrame, FrameMode } from './types.js';
 import { resolveFrameMode } from './types.js';
 import { resolve } from './resolve/index.js';
-import { probe, normalize, trim } from './media/ffmpeg.js';
+import { probe, normalizeVideo, extractAudio, trim } from './media/ffmpeg.js';
 import { FFmpegSceneDetector } from './media/scenes.js';
 import { planCandidates, extractCandidates } from './media/candidates.js';
 import { filterCandidates } from './vision/quality.js';
@@ -121,8 +121,16 @@ async function analyzeResolved(
     }
   }
 
-  // 3. Normalize
-  const { video, audio } = await normalize(media, workDir);
+  // 3. Normalize -- spec §8 / Fix 2: only pay for what this call needs.
+  // 'key' is the only mode that needs the re-encoded, canonical-format copy
+  // (scene detection, candidate extraction and quality filtering all assume
+  // it); 'even' and 'none' sample or skip the un-normalized media directly
+  // -- ffprobe/ffmpeg handle whatever container the resolver produced, and
+  // single-frame extraction does not care. This is the cost spec §8 named
+  // (re-encoding a two-hour source, plus a full WAV extraction below, to
+  // answer a one-frame request) that the model-stage short-circuiting alone
+  // (tests/analyzeShortcircuit.integration.test.ts) never removed.
+  const video = frameMode === 'key' ? (await normalizeVideo(media, workDir)).video : media;
   const meta = await probe(video);
   src.duration = meta.duration;
 
@@ -134,6 +142,12 @@ async function analyzeResolved(
   // 4. Transcript -- STAGE 1 (ASR worker runs and exits before any vision work)
   let transcript: Transcript | null = null;
   if (opts.transcript !== false) {
+    // Fix 2 (spec §8): the WAV extraction itself is real cost (a full
+    // 16kHz decode pass over the whole source) and is only ever needed for
+    // this branch -- extracted here, inside the same gate that decides
+    // whether a transcript runs at all, rather than unconditionally in
+    // stage 3 above.
+    const { audio } = await extractAudio(media, workDir);
     // Spec §2.2 ("Removed: mode and fps"): the caller-facing fast/accurate
     // dial is gone and accuracy bias becomes UNCONDITIONAL -- human-authored
     // captions win when present, otherwise local ASR runs; platform

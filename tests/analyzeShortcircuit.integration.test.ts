@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestVideo } from '../src/media/ffmpeg.js';
@@ -126,5 +126,54 @@ describe('even sampling shortfall warnings', () => {
     expect(
       m.processing.warnings.some((w) => w.includes('requested 3') && w.includes('extracted 2')),
     ).toBe(true);
+  }, 300_000);
+});
+
+// Fix 2 (spec §8): the model-stage short-circuits above are necessary but not
+// sufficient -- normalize()'s libx264 re-encode and full WAV extraction ran
+// unconditionally underneath them, so a one-frame 'even' request with
+// transcript:false still paid to re-encode and fully decode-to-PCM the whole
+// source before ever sampling a frame. These assert file EXISTENCE, not
+// timing (which is flaky and proves nothing under load): a work.wav/work.mp4
+// that should never have been created either exists or it does not.
+describe('media-stage cost (Fix 2: normalize()/WAV extraction pay only for what is needed)', () => {
+  it('extracts no work.wav when transcript is false, even in the default (key) frame mode', async () => {
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const outDir = join(dir, 'no-wav');
+    const m = await analyzeVideo(video, { maxFrames: 2, transcript: false, outDir });
+    expect(m.source.status).toBe('ok');
+    expect(existsSync(join(outDir, 'work.wav'))).toBe(false);
+  }, 300_000);
+
+  it('re-encodes no work.mp4 in even mode -- samples the un-normalized media directly', async () => {
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const outDir = join(dir, 'no-reencode-even');
+    const m = await analyzeVideo(video, {
+      start: 1, end: 4, frames: 'even', maxFrames: 2, transcript: false, outDir,
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.frames.length).toBeGreaterThan(0);
+    expect(existsSync(join(outDir, 'work.mp4'))).toBe(false);
+  }, 300_000);
+
+  it('re-encodes no work.mp4 when frames is none', async () => {
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const outDir = join(dir, 'no-reencode-none');
+    const m = await analyzeVideo(video, { frames: 'none', transcript: false, outDir });
+    expect(m.source.status).toBe('ok');
+    expect(existsSync(join(outDir, 'work.mp4'))).toBe(false);
+  }, 300_000);
+
+  it('positive control: key mode with a transcript DOES produce both work.mp4 and work.wav', async () => {
+    // Without this, the three negative assertions above could pass
+    // vacuously (an implementation that never produces either file under
+    // ANY circumstances would also pass them). This proves the opposite
+    // case still does the real work.
+    const { analyzeVideo } = await import('../dist/analyze.js');
+    const outDir = join(dir, 'both-produced');
+    const m = await analyzeVideo(video, { maxFrames: 2, outDir });
+    expect(m.source.status).toBe('ok');
+    expect(existsSync(join(outDir, 'work.mp4'))).toBe(true);
+    expect(existsSync(join(outDir, 'work.wav'))).toBe(true);
   }, 300_000);
 });

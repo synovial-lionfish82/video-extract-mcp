@@ -22,10 +22,14 @@ export async function probe(file: string) {
   };
 }
 
-/** 720p working video + 16 kHz mono wav. Platform differences end here (spec §8). */
-export async function normalize(input: string, workDir: string) {
+/**
+ * The video half of normalize(): re-encode to a 720p-capped working copy.
+ * Split out (spec §8 / Fix 2) so a caller that does not need the vision
+ * path -- 'even'/'none' frame modes, which sample/skip the un-normalized
+ * media directly -- never pays for this libx264 pass at all.
+ */
+export async function normalizeVideo(input: string, workDir: string) {
   const video = join(workDir, 'work.mp4');
-  const audio = join(workDir, 'work.wav');
   const v = await run('ffmpeg', [
     '-y', '-i', input,
     // force_divisible_by=2: aspect-preserving downscale of a portrait input
@@ -36,9 +40,32 @@ export async function normalize(input: string, workDir: string) {
     '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', video,
   ]);
   if (v.code !== 0) throw new Error(`normalize(video) failed: ${v.stderr.slice(-400)}`);
-  // Attempt to extract audio. If input has no audio stream, the audio file will not be created.
-  // Downstream treats file absence as "no audio" and decides whether to transcribe accordingly.
+  return { video };
+}
+
+/**
+ * The audio half of normalize(): extract a 16kHz mono wav. Split out (spec §8
+ * / Fix 2) so a caller with transcript:false never pays for this pass.
+ * If input has no audio stream, the audio file will not be created --
+ * downstream treats file absence as "no audio" and decides whether to
+ * transcribe accordingly.
+ */
+export async function extractAudio(input: string, workDir: string) {
+  const audio = join(workDir, 'work.wav');
   await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio]);
+  return { audio };
+}
+
+/**
+ * 720p working video + 16 kHz mono wav. Platform differences end here
+ * (spec §8). Kept as a single call for existing/future callers that
+ * genuinely want both; analyze.ts itself now calls normalizeVideo()/
+ * extractAudio() independently so it only pays for what a given request
+ * actually needs (Fix 2).
+ */
+export async function normalize(input: string, workDir: string) {
+  const { video } = await normalizeVideo(input, workDir);
+  const { audio } = await extractAudio(input, workDir);
   return { video, audio };
 }
 
