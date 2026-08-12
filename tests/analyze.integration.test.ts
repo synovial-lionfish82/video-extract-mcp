@@ -708,4 +708,38 @@ describe('analyzeVideo -- onStage progress seams (spec §7)', () => {
     expect(m.source.status).toBe('ok');
     expect(stages).toEqual(['resolving']);   // no fabricated stages for skipped work (§7/§8)
   }, 120_000);
+
+  it("emits resolving -> transcribing -> frames for frames: 'even' too, not just the default 'key' path", async () => {
+    // Review finding (task-3): test 1 above only ever exercises the 'key'
+    // branch's onStage?.('frames') call, because leaving `frames` unset
+    // makes resolveFrameMode default to 'key' whenever maxFrames > 0. That
+    // left the 'even' branch's OWN emit as a full surviving mutant --
+    // deleting that one line left all other tests (including test 1) green.
+    // This test forces frames: 'even' specifically to close that gap.
+    // It also reuses a manual caption track (mirroring the 'AUTOMATIC
+    // caption track' test above) so the transcript stage completes via
+    // captions rather than a real ASR run -- deterministic, no model
+    // dependency -- which doubles as coverage for 'transcribing' firing on
+    // the captions sub-path, not just the ASR sub-path test 1 covers.
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-stage-even-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const vtt = join(dir, 'stage-even.vtt');
+    writeFileSync(vtt, [
+      'WEBVTT', '',
+      '00:00:01.000 --> 00:00:02.000', 'STAGE_EVEN_MARKER', '',
+    ].join('\n'));
+    vi.mocked(resolve).mockImplementationOnce(async () => ({
+      status: 'ok', filePath: v, platform: 'test', title: 'T', duration: 9,
+      resolvedBy: 'ytdlp', captions: { manual: { path: vtt, language: 'en' }, auto: null },
+      languageHint: 'en', rangeApplied: false,
+    }));
+    const stages: string[] = [];
+    const m = await analyzeVideo('https://stage.example/v3', {
+      frames: 'even', maxFrames: 2, outDir: join(dir, 'out'), onStage: (s) => stages.push(s),
+    });
+    expect(m.source.status).toBe('ok');
+    expect(m.transcript).not.toBeNull();
+    expect(m.transcript!.source).toBe('manual');
+    expect(stages).toEqual(['resolving', 'transcribing', 'frames']);
+  }, 120_000);
 });
