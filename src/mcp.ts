@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { InMemoryTaskStore } from '@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { resolveVideoTool } from './agent/resolveTool.js';
-import { analyzeVideoTool } from './agent/analyzeTool.js';
+import { analyzeVideoTool, type AnalyzeToolArgs } from './agent/analyzeTool.js';
+import { resolveVideoTool, type ResolveToolArgs } from './agent/resolveTool.js';
+import { createSlotPool, analyzeConcurrencyFromEnv, taskTtlMsFromEnv, type SlotPool } from './agent/slots.js';
 import { isMainModule } from './util/entry.js';
 
 export const TOOL_NAMES = ['resolve_video', 'analyze_video'] as const;
+
+const toResult = (r: unknown): CallToolResult =>
+  ({ content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] });
 
 const PLATFORMS =
   'Known-working sources: YouTube, TikTok, Facebook and Reels, X/Twitter, Instagram, '
@@ -14,129 +20,225 @@ const PLATFORMS =
   + 'sites work through generic extraction; some will not, and those return a clear '
   + 'failure status rather than throwing.';
 
+const LIFETIME =
+  'Artifacts written to destinationPath are NEVER deleted by this tool -- pick a '
+  + 'temp directory if you want them ephemeral. In background-task mode the task '
+  + 'handle expires (default 30 minutes) and dies with the server process, but the '
+  + 'files are the durable result and survive both.';
+
+const BATCHING =
+  'videos is an array: pass one item for a single video, several to process a batch '
+  + 'in one call. One video writes directly into destinationPath; several each write '
+  + 'into destinationPath/video-1/, video-2/ ... in array order. Results come back as '
+  + 'one entry per item, in order, each with its own status -- one video failing '
+  + 'never fails the others.';
+
+const SERVER_INSTRUCTIONS =
+  'Video extraction for AI agents, in two tools. resolve_video looks videos up and, by '
+  + 'default, returns only metadata -- title, creator, duration and chapters -- without '
+  + 'downloading anything heavy; pass returnVideo: true per item when you want the media '
+  + 'file. analyze_video does the real work: transcript plus important, deduplicated '
+  + 'keyframes. Both take a videos array (one item is the common case) and write output '
+  + 'to a directory you choose (destinationPath), returning a compact summary plus file '
+  + 'paths rather than dumping everything into the conversation. Both also support MCP '
+  + 'background tasks: called as a task, they return a handle immediately and push '
+  + 'status notifications while the work runs -- useful because a full analysis of a '
+  + 'long video takes minutes. A good habit on a long video is to call resolve_video '
+  + 'first, read the chapter list, then analyze only the section that matters.';
+
+const analyzeItemSchema = z.object({
+  pathOrUrl: z.string().describe('A video URL, or a path to a video file already on this machine. Both are accepted.'),
+  start: z.number().optional().describe('Start second of the range to analyze. Provide with end; either alone is ignored. Note that if pathOrUrl is a clip previously fetched with a range, times are relative to that clip, which starts at 0.'),
+  end: z.number().optional().describe('End second of the range. Set equal to start for a single instant (requires frames: "even").'),
+  frames: z.enum(['key', 'even', 'none']).optional().describe('"key" (default): the most informative frames, deduplicated. "even": uniform sampling across the range. "none": no frames (transcript only).'),
+  maxFrames: z.number().optional().describe('Maximum frames to return. With frames "even" this sets density across the range. 0 with frames omitted means the same as frames: "none". Default 35.'),
+  transcript: z.boolean().optional().default(true).describe('Produce a transcript. Set false to skip transcription entirely when you only want frames.'),
+  language: z.string().optional().describe('Language hint such as "zh", "ja" or "en". Usually inferred from the platform; supply it when the source carries no language metadata or the guess is wrong.'),
+});
+
+// Note: `frames` deliberately carries no `.default('key')` -- the 0.1.0 Fix 3
+// invariant. A schema-level default would mean `frames` is NEVER undefined
+// by the time it reaches resolveFrameMode (src/types.ts), which would make
+// the maxFrames:0-with-frames-omitted alias to frames:'none' unreachable
+// through this server (tests/mcp.test.ts pins this). `maxFrames` similarly
+// carries no `.default(35)`: src/analyze.ts:77's own `opts.maxFrames ?? 35`
+// already supplies that default deeper in the pipeline, so an omitted
+// maxFrames still behaves as 35 without the schema needing to duplicate it.
+const ANALYZE_DESCRIPTION =
+  'Given video URLs or local video files, returns for each its transcript and a small '
+  + 'set of important, deduplicated keyframes -- not every frame, just the ones that '
+  + 'carry information (scene changes, on-screen text, visual novelty). Output is '
+  + 'written to destinationPath: per video a manifest, the transcript, and the frame '
+  + 'images; the reply is one compact summary per video plus those paths, with a '
+  + 'transcript included inline when it is short. The transcript comes from the '
+  + "platform's own captions whenever the video has any -- human-written ones first, "
+  + "otherwise the platform's automatic ones -- and speech is transcribed locally only "
+  + 'for videos with no captions at all; transcript.source tells you which you got. '
+  + BATCHING + ' Use start/end per item to analyze only part of a video -- for supported '
+  + 'sources only that section is downloaded, and the transcript covers just that '
+  + 'section (the single-instant recipe below is the one exception: nothing is trimmed '
+  + 'there, so a transcript, if requested, covers the whole video). frames controls how '
+  + 'frames are chosen per item; for a single exact frame, set start and end to the same '
+  + 'second with frames: "even", maxFrames: 1 and transcript: false. On failure an item '
+  + 'returns a status that is not "ok" with a readable reason, rather than throwing -- '
+  + "always check each item's status first, and check its warnings: any optional stage "
+  + 'that failed and was skipped past records an entry there, so an empty transcript can '
+  + 'be told apart from a video that simply has no speech. Called as a background task, '
+  + 'this returns a handle immediately; progress arrives as status messages like '
+  + '"video 2/3: transcribing" or "queued, 1 ahead" (analyses run through a concurrency '
+  + 'pool, default 4 at once, VIDEO_EXTRACT_MAX_CONCURRENCY to change; each concurrent '
+  + 'analysis needs about 1.1 GB of memory). A queued task can be cancelled; a task '
+  + 'whose work has already started cannot -- it will refuse, finish, and deliver its '
+  + 'result. ' + LIFETIME + " Each item's result also carries videoPath, the local file it "
+  + 'worked from, which you can pass straight back in to inspect another moment without '
+  + 're-downloading. ' + PLATFORMS;
+
+const resolveItemSchema = z.object({
+  url: z.string().describe('Page or direct video URL.'),
+  returnVideo: z.boolean().optional().default(false).describe('Download the media file as well as its metadata. Default false -- metadata only.'),
+  start: z.number().optional().describe('Start second of the section to fetch. Only meaningful with returnVideo: true. Provide with end; either alone is ignored and the whole video is fetched.'),
+  end: z.number().optional().describe('End second of the section to fetch. Only meaningful with returnVideo: true. Provide with start; either alone is ignored and the whole video is fetched.'),
+  comments: z.boolean().optional().default(false).describe('Also fetch comments into the metadata file. Off by default: can be very slow on popular videos.'),
+});
+
+const RESOLVE_DESCRIPTION =
+  'Looks up videos and writes what it finds to destinationPath. By DEFAULT it returns '
+  + 'metadata only and does NOT download media: per video the title, creator, duration, '
+  + 'chapter list (when the platform provides one), a short description preview, and a '
+  + 'path to the full metadata file. That is the cheap way to decide what to do next. '
+  + "Set returnVideo: true on an item to also download that video's media file -- a "
+  + 'real download that takes real time. With returnVideo: true you may also pass '
+  + 'start/end (both together; either alone is ignored and fetches the whole video) to '
+  + 'fetch only a section; for supported sources only that section is downloaded, and a '
+  + 'fetched clip STARTS AT 0 rather than at the original timestamp (the result says '
+  + 'so, and gives the offset). ' + BATCHING + ' Use this tool when you only need to know '
+  + 'what videos are, or when you want video files without any analysis. Called as a '
+  + 'background task it returns a handle immediately and reports status while it runs; '
+  + 'resolve work is never queued behind analyses. ' + LIFETIME + ' ' + PLATFORMS + ' Comments are '
+  + 'off by default and can be slow to fetch on popular videos; when enabled they are '
+  + 'written to the metadata file, never returned inline.';
+
+// Task 6 extends this pattern (progress mapping + the eventual cancellation
+// hook), so it stays a named function rather than being inlined.
+type Store = InMemoryTaskStore;
+const label = (i: number, n: number, msg: string) => (n === 1 ? msg : `video ${i + 1}/${n}: ${msg}`);
+
+function runAnalyzeExecution(
+  args: AnalyzeToolArgs, pool: SlotPool,
+  onUpdate?: (message: string) => void, onItemStart?: (itemIndex: number) => void,
+): Promise<import('./agent/analyzeTool.js').AnalyzeToolResult> {
+  const n = args.videos.length;
+  return analyzeVideoTool(args, {
+    run: (fn, onQueued) => pool.run(fn, onQueued),
+    onStage: (i, s) => onUpdate?.(label(i, n, s)),
+    onQueued: (i, ahead) => onUpdate?.(label(i, n, `queued, ${ahead} ahead`)),
+    onItemStart,
+  });
+}
+
 /**
- * Exposes the finished engine to AI agents over MCP. Built with
- * `registerTool` (not the older `tool(name, description, schema, handler)`
- * overload the brief's own sample used) -- that overload still exists on
- * this SDK version (1.30.0) and would compile, but its own JSDoc marks it
- * `@deprecated Use registerTool instead`, and `registerTool`'s config-object
- * form is what the SDK's README documents as the current way to register a
- * tool with a description, input schema and (optionally) annotations
- * together. See task-16-report.md for how this was verified against the
- * installed package's own .d.ts rather than assumed from the brief's sample.
+ * Exposes the finished engine to AI agents over MCP. Both tools are
+ * registered with `server.experimental.tasks.registerToolTask` (not the
+ * plain `registerTool` the 0.1.x surface used) and
+ * `execution: { taskSupport: 'optional' }` -- this single registration
+ * serves both an ordinary synchronous `client.callTool()` and a
+ * task-augmented background call from the same handler triple
+ * (`createTask`/`getTask`/`getTaskResult`), rather than needing two
+ * separate code paths. The fact this whole design leans on -- that a plain
+ * call against an 'optional' task-registered tool is served by the SDK's
+ * own automatic task-polling (`handleAutomaticTaskPolling` in
+ * `server/mcp.js`), with no capability declaration and no separate
+ * non-task handler required -- was verified empirically against the
+ * installed SDK (1.30.0) before any of this was written: see
+ * task-1-report.md's "linchpin" finding, pinned permanently by
+ * `tests/taskSpike.test.ts`. `registerToolTask` is itself an
+ * `@experimental` API, which is why the SDK dependency is pinned to an
+ * exact version rather than a caret range (spec §10).
  */
-export function buildServer(): McpServer {
+export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
+  const pool = opts?.analyzeSlots ?? createSlotPool(analyzeConcurrencyFromEnv());
+  const store: Store = new InMemoryTaskStore();
   const server = new McpServer(
-    { name: 'norma-video', version: '2.0.0' },
-    {
-      instructions:
-        'Video extraction for AI agents, in two tools. resolve_video looks a video up '
-        + 'and, by default, returns only its metadata -- title, creator, duration and '
-        + 'chapters -- without downloading anything heavy; pass returnVideo: true when '
-        + 'you actually want the media file. analyze_video does the real work: transcript '
-        + 'plus important, deduplicated keyframes. Both write their output to a directory '
-        + 'you choose (destinationPath), returning a compact summary plus file paths '
-        + 'rather than dumping everything into the conversation. A good habit on a long '
-        + 'video is to call resolve_video first, read the chapter list, then call '
-        + 'analyze_video with start/end covering only the chapter that matters -- for '
-        + 'supported sources that downloads just that section instead of the whole video.',
-    },
+    { name: 'norma-video', version: '0.2.0' },
+    { taskStore: store, instructions: SERVER_INSTRUCTIONS },
   );
 
-  server.registerTool(
-    'resolve_video',
-    {
-      title: 'Resolve video (metadata, optionally the file)',
-      description:
-        'Looks up a video and writes what it finds to destinationPath. By DEFAULT it '
-        + 'returns metadata only and does NOT download the media: title, creator, '
-        + 'duration, chapter list (when the platform provides one), a short description '
-        + 'preview, and a path to the full metadata file. That is the cheap way to decide '
-        + 'what to do next. Set returnVideo: true to also download the media file -- that '
-        + 'is a real download and takes real time. With returnVideo: true you may also '
-        + 'pass start/end to fetch only a section; for supported sources only that section '
-        + 'is downloaded, and a fetched clip STARTS AT 0 rather than at the original '
-        + 'timestamp (the result says so, and gives the offset). Use this tool when you '
-        + 'only need to know what a video is, or when you want the video file itself '
-        + 'without any analysis. ' + PLATFORMS + ' Comments are off by default and can be '
-        + 'slow to fetch on popular videos; when enabled they are written to the metadata '
-        + 'file, never returned inline.',
-      inputSchema: {
-        url: z.string().describe('Page or direct video URL.'),
-        destinationPath: z.string().describe('Directory to write metadata (and the video, if requested) into. Created if missing. Re-running the same call overwrites in place.'),
-        returnVideo: z.boolean().optional().default(false).describe('Download the media file as well as its metadata. Default false -- metadata only.'),
-        start: z.number().optional().describe('Start second of the section to fetch. Only meaningful with returnVideo: true. Provide with end; either alone is ignored and the whole video is fetched.'),
-        end: z.number().optional().describe('End second of the section to fetch. Only meaningful with returnVideo: true. Provide with start; either alone is ignored and the whole video is fetched.'),
-        comments: z.boolean().optional().default(false).describe('Also fetch comments into the metadata file. Off by default: can be very slow on popular videos.'),
-      },
-      // Fix 4(c): both tools write to the user's filesystem -- metadata,
-      // media, manifest, transcript and frame images -- and both delete
-      // their own working files afterwards. readOnlyHint:true was false,
-      // and clients make trust decisions on this annotation.
-      annotations: { readOnlyHint: false, openWorldHint: true },
-    },
-    async (args) => {
-      const { destinationPath, ...item } = args;
-      const r = await resolveVideoTool({ destinationPath, videos: [item] });
-      return { content: [{ type: 'text', text: JSON.stringify(r.videos[0]!, null, 2) }] };
-    },
-  );
-
-  server.registerTool(
+  server.experimental.tasks.registerToolTask(
     'analyze_video',
     {
       title: 'Analyze video',
-      description:
-        'Given a video URL or a local video file, returns its transcript and a small set '
-        + 'of important, deduplicated keyframes -- not every frame, just the ones that '
-        + 'carry information (scene changes, on-screen text, visual novelty). Output is '
-        + 'written to destinationPath: a manifest, the transcript, and the frame images; '
-        + 'the reply is a summary plus those paths, with the transcript included inline '
-        + "when it is short. The transcript comes from the platform's own captions "
-        + 'whenever the video has any -- human-written ones first, otherwise the '
-        + "platform's automatic ones -- and speech is transcribed locally only for "
-        + 'videos with no captions at all. transcript.source tells you which you got '
-        + '("manual", "auto" or "asr"). A captioned video is therefore much faster and '
-        + 'more accurate than an uncaptioned one, and its timings are finer-grained, '
-        + 'which makes frame-to-speech alignment tighter. Use start/end to analyze only part of a video -- for '
-        + 'supported sources only that section is downloaded, and the transcript covers '
-        + 'just that section (the single-instant recipe below is the one exception: '
-        + 'nothing is trimmed there, so a transcript, if requested, covers the whole '
-        + 'video, not just the instant). frames controls how frames are chosen: "key" (default) picks '
-        + 'the most informative ones, "even" samples the range uniformly (maxFrames over '
-        + 'the window sets the density, so 60 frames across 30 seconds is 2 per second), '
-        + 'and "none" returns no frames at all, which is how you ask for a transcript '
-        + 'alone. For a single exact frame, set start and end to the same second with '
-        + 'frames: "even", maxFrames: 1 and transcript: false -- a single instant has no '
-        + 'speech to transcribe, and leaving transcript on makes the cheapest request pay '
-        + "for the whole video's transcription. On failure this returns a result whose status "
-        + 'is not "ok" with a readable reason, rather than throwing -- always check status '
-        + 'first. Check warnings too: any optional stage that failed and was skipped past '
-        + '(on-screen text, image analysis, speech recognition) records an entry there, so '
-        + 'an empty transcript can be told apart from a video that simply has no speech. '
-        + 'The result also carries videoPath, the local file it worked from, which you can '
-        + 'pass straight back in to inspect another moment without re-downloading. '
-        + PLATFORMS,
+      description: ANALYZE_DESCRIPTION,
       inputSchema: {
-        pathOrUrl: z.string().describe('A video URL, or a path to a video file already on this machine. Both are accepted.'),
-        destinationPath: z.string().describe('Directory to write the manifest, transcript and frames into. Created if missing.'),
-        start: z.number().optional().describe('Start second of the range to analyze. Provide with end; either alone is ignored. Note that if pathOrUrl is a clip previously fetched with a range, times are relative to that clip, which starts at 0.'),
-        end: z.number().optional().describe('End second of the range. For a single instant, set this equal to start -- but only with frames: "even"; the default "key" mode fails on a zero-length range.'),
-        frames: z.enum(['key', 'even', 'none']).optional().describe('"key" (default): the most informative frames, deduplicated. "even": uniform sampling across the range. "none": no frames (transcript only).'),
-        maxFrames: z.number().optional().default(35).describe('Maximum frames to return. With frames "even" this sets density across the range. 0 means the same as frames: "none", but only when frames is not given at all -- an explicit frames value always wins, so frames: "even", maxFrames: 0 stays "even".'),
-        transcript: z.boolean().optional().default(true).describe('Produce a transcript. Set false to skip transcription entirely when you only want frames.'),
-        language: z.string().optional().describe('Language hint such as "zh", "ja" or "en". Usually inferred from the platform; supply it when the source carries no language metadata or the guess is wrong.'),
+        destinationPath: z.string().describe('Directory to write manifests, transcripts and frames into. Created if missing.'),
+        videos: z.array(analyzeItemSchema).min(1).describe('One entry per video to analyze. One item = single video, flat layout; several = video-N subdirectories.'),
       },
       // Fix 4(c): both tools write to the user's filesystem -- metadata,
       // media, manifest, transcript and frame images -- and both delete
       // their own working files afterwards. readOnlyHint:true was false,
       // and clients make trust decisions on this annotation.
       annotations: { readOnlyHint: false, openWorldHint: true },
+      execution: { taskSupport: 'optional' },
     },
-    async (args) => {
-      const { destinationPath, ...item } = args;
-      const r = await analyzeVideoTool({ destinationPath, videos: [item] });
-      return { content: [{ type: 'text', text: JSON.stringify(r.videos[0]!, null, 2) }] };
+    {
+      createTask: async (args, extra) => {
+        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
+        void (async () => {
+          try {
+            const r = await runAnalyzeExecution(args as AnalyzeToolArgs, pool,
+              (m) => void extra.taskStore.updateTaskStatus(task.taskId, 'working', m).catch(() => {}));
+            await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+          } catch (e) {
+            // Spec §8: task-failed is reserved for the wrapper itself breaking.
+            await extra.taskStore.storeTaskResult(task.taskId, 'failed', {
+              content: [{ type: 'text', text: `task execution failed: ${e instanceof Error ? e.message : String(e)}` }],
+              isError: true,
+            }).catch(() => {});
+          }
+        })();
+        return { task };
+      },
+      getTask: async (_args, extra) => extra.taskStore.getTask(extra.taskId),
+      getTaskResult: async (_args, extra) => (await extra.taskStore.getTaskResult(extra.taskId)) as CallToolResult,
+    },
+  );
+
+  server.experimental.tasks.registerToolTask(
+    'resolve_video',
+    {
+      title: 'Resolve video (metadata, optionally the file)',
+      description: RESOLVE_DESCRIPTION,
+      inputSchema: {
+        destinationPath: z.string().describe('Directory to write metadata (and the video, if requested) into. Created if missing.'),
+        videos: z.array(resolveItemSchema).min(1).describe('One entry per video to resolve. One item = single video, flat layout; several = video-N subdirectories.'),
+      },
+      // Fix 4(c): both tools write to the user's filesystem -- metadata,
+      // media, manifest, transcript and frame images -- and both delete
+      // their own working files afterwards. readOnlyHint:true was false,
+      // and clients make trust decisions on this annotation.
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      execution: { taskSupport: 'optional' },
+    },
+    {
+      // Spec §6: resolve_video loads no models -- it is network and ffmpeg
+      // -- so, unlike analyze_video, it never goes near the slot pool.
+      createTask: async (args, extra) => {
+        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
+        void (async () => {
+          try {
+            const r = await resolveVideoTool(args as ResolveToolArgs);
+            await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+          } catch (e) {
+            // Spec §8: task-failed is reserved for the wrapper itself breaking.
+            await extra.taskStore.storeTaskResult(task.taskId, 'failed', {
+              content: [{ type: 'text', text: `task execution failed: ${e instanceof Error ? e.message : String(e)}` }],
+              isError: true,
+            }).catch(() => {});
+          }
+        })();
+        return { task };
+      },
+      getTask: async (_args, extra) => extra.taskStore.getTask(extra.taskId),
+      getTaskResult: async (_args, extra) => (await extra.taskStore.getTaskResult(extra.taskId)) as CallToolResult,
     },
   );
 

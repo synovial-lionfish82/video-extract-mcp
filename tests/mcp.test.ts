@@ -8,6 +8,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { buildServer, TOOL_NAMES } from '../src/mcp.js';
 import { makeTestVideo } from '../src/media/ffmpeg.js';
+import { createSlotPool, type SlotPool } from '../src/agent/slots.js';
 
 // A real MCP Client wired to a freshly-built server over the SDK's own
 // InMemoryTransport. This is what makes "testing an MCP server without a
@@ -44,10 +45,14 @@ async function connectClient(server: McpServer): Promise<Client> {
 // real type afterwards -- the index signature makes 'content' a "valid key"
 // on the task-handle branch too (typed unknown), so the narrowed access
 // resolves to `SomeArray | unknown`, which TypeScript collapses to
-// `unknown`. The `in` check below still does its real job at RUNTIME (these
-// tools never use task-based execution, so the content-bearing branch is
-// always what comes back); the `as CallToolResult` cast right after it is
-// what recovers the real static type once that runtime shape is confirmed.
+// `unknown`. The `in` check below still does its real job at RUNTIME (both
+// tools are now task-registered with taskSupport:'optional', but every call
+// here is a PLAIN client.callTool() -- the server's automatic task-polling
+// wrapper (task-1-report.md's linchpin) resolves that into an ordinary
+// content-bearing CallToolResult before the client ever sees a task handle,
+// so the content-bearing branch is always what comes back); the `as
+// CallToolResult` cast right after it is what recovers the real static type
+// once that runtime shape is confirmed.
 async function callToolOk(client: Client, params: Parameters<Client['callTool']>[0]): Promise<CallToolResult['content']> {
   const result = await client.callTool(params);
   if (!('content' in result)) throw new Error('expected a content-bearing CallToolResult, got a task result');
@@ -69,6 +74,16 @@ function firstText(content: CallToolResult['content']): string {
   const first = content[0];
   if (!first || first.type !== 'text') throw new Error(`expected a text content block, got ${JSON.stringify(first)}`);
   return first.text;
+}
+
+/** Every v0.2 tool call is now `{destinationPath, videos: [...]}` and every
+ *  reply is `{videos: [...]}` -- one entry per item, in order, even at N=1
+ *  (task-5-brief.md Step 1: "reads via parsed.videos[0]"). This is a
+ *  deliberate break from 0.1.0's flat single-object reply; only the ON-DISK
+ *  layout stays byte-identical at N=1 (see the 'v0.2 batch schema' describe
+ *  below), not the JSON reply shape. */
+function firstVideo<T>(content: CallToolResult['content']): T {
+  return (JSON.parse(firstText(content)) as { videos: T[] }).videos[0]!;
 }
 
 // task-8-brief.md's own Step-1 tests, kept verbatim (byte-for-byte the same
@@ -124,15 +139,22 @@ describe('resolve_video', () => {
   it('rejects a call missing the required url', async () => {
     const client = await connectClient(buildServer());
     const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-rv-'));
-    const content = await callToolExpectError(client, { name: 'resolve_video', arguments: { destinationPath: dir } });
+    const content = await callToolExpectError(client, { name: 'resolve_video', arguments: { destinationPath: dir, videos: [{}] } });
     expect(firstText(content)).toContain('url');
     await client.close();
   });
 
   it('rejects a call missing the required destinationPath', async () => {
     const client = await connectClient(buildServer());
-    const content = await callToolExpectError(client, { name: 'resolve_video', arguments: { url: 'https://x/v' } });
+    const content = await callToolExpectError(client, { name: 'resolve_video', arguments: { videos: [{ url: 'https://x/v' }] } });
     expect(firstText(content)).toContain('destinationPath');
+    await client.close();
+  });
+
+  it('rejects an empty videos array (min(1) is its own schema literal, separate from analyze_video\'s)', async () => {
+    const client = await connectClient(buildServer());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-rv-empty-'));
+    await callToolExpectError(client, { name: 'resolve_video', arguments: { destinationPath: dir, videos: [] } });
     await client.close();
   });
 
@@ -146,14 +168,20 @@ describe('resolve_video', () => {
     // off the LIVE registered schema via listTools(), NOT a hardcoded
     // string also written in this file -- a constant compared to itself
     // would pass regardless of what src/mcp.ts actually says, which is
-    // exactly the trap this test is written to avoid.
+    // exactly the trap this test is written to avoid. v0.2 nests start/end
+    // under the per-item schema (videos[].start/end, not a top-level
+    // field) -- the exact JSON-Schema shape (array -> items -> properties)
+    // was confirmed empirically against a live listTools() response before
+    // writing this path, not assumed.
     const client = await connectClient(buildServer());
     const { tools } = await client.listTools();
     const resolveVideo = tools.find((t) => t.name === 'resolve_video');
     if (!resolveVideo) throw new Error('resolve_video not found in listTools()');
-    const props = resolveVideo.inputSchema.properties as Record<string, { description?: string }> | undefined;
-    const startDesc = props?.start?.description ?? '';
-    const endDesc = props?.end?.description ?? '';
+    const videosSchema = resolveVideo.inputSchema.properties?.videos as
+      { items?: { properties?: Record<string, { description?: string }> } } | undefined;
+    const itemProps = videosSchema?.items?.properties;
+    const startDesc = itemProps?.start?.description ?? '';
+    const endDesc = itemProps?.end?.description ?? '';
     expect(startDesc).toMatch(/either alone is ignored/i);
     expect(startDesc.toLowerCase()).toContain('whole video');
     expect(endDesc).toMatch(/either alone is ignored/i);
@@ -168,11 +196,11 @@ describe('resolve_video', () => {
     const client = await connectClient(buildServer());
     const content = await callToolOk(client, {
       name: 'resolve_video',
-      arguments: { url: video, destinationPath: destDir, returnVideo: true },
+      arguments: { destinationPath: destDir, videos: [{ url: video, returnVideo: true }] },
     });
-    const result = JSON.parse(firstText(content)) as {
+    const result = firstVideo<{
       status: string; duration: number; platform: string; videoPath: string; metadataPath: string;
-    };
+    }>(content);
     expect(result.status).toBe('ok');
     // Exact, not "greater than zero": makeTestVideo(_, 6) probes to exactly
     // 6.0s (verified precedent: tests/primitives.test.ts's own 9s-fixture
@@ -200,9 +228,9 @@ describe('resolve_video', () => {
     const client = await connectClient(buildServer());
     const content = await callToolOk(client, {
       name: 'resolve_video',
-      arguments: { url: video, destinationPath: destDir },
+      arguments: { destinationPath: destDir, videos: [{ url: video }] },
     });
-    const result = JSON.parse(firstText(content)) as { status: string; videoPath?: string; nextSteps?: string };
+    const result = firstVideo<{ status: string; videoPath?: string; nextSteps?: string }>(content);
     expect(result.status).toBe('ok');
     expect(result.videoPath).toBeUndefined();
     expect(result.nextSteps).toMatch(/returnVideo/);
@@ -214,14 +242,14 @@ describe('analyze_video', () => {
   it('rejects a call missing the required pathOrUrl', async () => {
     const client = await connectClient(buildServer());
     const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-'));
-    const content = await callToolExpectError(client, { name: 'analyze_video', arguments: { destinationPath: dir } });
+    const content = await callToolExpectError(client, { name: 'analyze_video', arguments: { destinationPath: dir, videos: [{}] } });
     expect(firstText(content)).toContain('pathOrUrl');
     await client.close();
   });
 
   it('rejects a call missing the required destinationPath', async () => {
     const client = await connectClient(buildServer());
-    const content = await callToolExpectError(client, { name: 'analyze_video', arguments: { pathOrUrl: 'https://x/v' } });
+    const content = await callToolExpectError(client, { name: 'analyze_video', arguments: { videos: [{ pathOrUrl: 'https://x/v' }] } });
     expect(firstText(content)).toContain('destinationPath');
     await client.close();
   });
@@ -239,9 +267,9 @@ describe('analyze_video', () => {
     const badPath = join(tmpdir(), 'norma-mcp-test-does-not-exist', 'nope.mp4');
     const content = await callToolOk(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: badPath, destinationPath: dir, frames: 'even' },
+      arguments: { destinationPath: dir, videos: [{ pathOrUrl: badPath, frames: 'even' }] },
     });
-    const result = JSON.parse(firstText(content)) as { status: string };
+    const result = firstVideo<{ status: string }>(content);
     expect(result.status).not.toBe('ok');
     await client.close();
   }, 15_000);
@@ -251,7 +279,7 @@ describe('analyze_video', () => {
     const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-av-dense-'));
     const content = await callToolExpectError(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: 'https://x/v', destinationPath: dir, frames: 'dense' },
+      arguments: { destinationPath: dir, videos: [{ pathOrUrl: 'https://x/v', frames: 'dense' }] },
     });
     expect(firstText(content)).toContain('frames');
     await client.close();
@@ -271,9 +299,9 @@ describe('analyze_video', () => {
     const client = await connectClient(buildServer());
     const content = await callToolOk(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: video, destinationPath: destDir, maxFrames: 0, transcript: false },
+      arguments: { destinationPath: destDir, videos: [{ pathOrUrl: video, maxFrames: 0, transcript: false }] },
     });
-    const result = JSON.parse(firstText(content)) as { status: string; frameCount: number; manifestPath: string };
+    const result = firstVideo<{ status: string; frameCount: number; manifestPath: string }>(content);
     expect(result.status).toBe('ok');
     expect(result.frameCount).toBe(0);
     const manifest = JSON.parse(readFileSync(result.manifestPath, 'utf8')) as { processing: { frameMode: string } };
@@ -288,9 +316,9 @@ describe('analyze_video', () => {
     const client = await connectClient(buildServer());
     const content = await callToolOk(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: video, destinationPath: destDir, frames: 'even', maxFrames: 0, transcript: false },
+      arguments: { destinationPath: destDir, videos: [{ pathOrUrl: video, frames: 'even', maxFrames: 0, transcript: false }] },
     });
-    const result = JSON.parse(firstText(content)) as { status: string; manifestPath: string };
+    const result = firstVideo<{ status: string; manifestPath: string }>(content);
     expect(result.status).toBe('ok');
     const manifest = JSON.parse(readFileSync(result.manifestPath, 'utf8')) as { processing: { frameMode: string } };
     expect(manifest.processing.frameMode).toBe('even');
@@ -313,11 +341,11 @@ describe('analyze_video', () => {
     const badPath = join(tmpdir(), 'norma-mcp-test-does-not-exist', 'nope.mp4');
     const content = await callToolOk(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: badPath, destinationPath: dir },
+      arguments: { destinationPath: dir, videos: [{ pathOrUrl: badPath }] },
     });
-    const result = JSON.parse(firstText(content)) as {
+    const result = firstVideo<{
       status: string; frameCount: number; framePaths: unknown[]; warnings: unknown[]; manifestPath: string;
-    };
+    }>(content);
     expect(result.status).not.toBe('ok');
     expect(result.frameCount).toBe(0);
     expect(result.framePaths).toEqual([]);
@@ -344,11 +372,11 @@ describe('analyze_video', () => {
     const client = await connectClient(buildServer());
     const content = await callToolOk(client, {
       name: 'analyze_video',
-      arguments: { pathOrUrl: video, destinationPath: destDir, maxFrames: 2, transcript: false },
+      arguments: { destinationPath: destDir, videos: [{ pathOrUrl: video, maxFrames: 2, transcript: false }] },
     });
-    const result = JSON.parse(firstText(content)) as {
+    const result = firstVideo<{
       status: string; videoPath?: string; framePaths: string[]; manifestPath: string;
-    };
+    }>(content);
     expect(result.status).toBe('ok');
     // The local source itself: never duplicated, never destroyed.
     expect(result.videoPath).toBe(video);
@@ -366,4 +394,186 @@ describe('analyze_video', () => {
     for (const f of manifest.frames) expect(existsSync(f.image)).toBe(true);
     await client.close();
   }, 60_000);
+});
+
+describe('v0.2 batch schema', () => {
+  it('rejects an empty videos array', async () => {
+    const client = await connectClient(buildServer());
+    const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-batch-empty-'));
+    const content = await callToolExpectError(client, {
+      name: 'analyze_video',
+      arguments: { destinationPath: dir, videos: [] },
+    });
+    // Not just isError:true (callToolExpectError already asserts that) --
+    // the message should actually be about the empty array, not some other
+    // validation failure it coincidentally also triggers.
+    expect(firstText(content).toLowerCase()).toContain('videos');
+    await client.close();
+  });
+
+  it('rejects a call missing destinationPath', async () => {
+    const client = await connectClient(buildServer());
+    const content = await callToolExpectError(client, {
+      name: 'analyze_video',
+      arguments: { videos: [{ pathOrUrl: 'https://x/v' }] },
+    });
+    expect(firstText(content)).toContain('destinationPath');
+    await client.close();
+  });
+
+  it('N=1 layout is byte-identical to 0.1.0: manifest.json at destinationPath root', async () => {
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-n1-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 6);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-mcp-n1-'));
+    const client = await connectClient(buildServer());
+    await callToolOk(client, {
+      name: 'analyze_video',
+      arguments: { destinationPath: destDir, videos: [{ pathOrUrl: video, frames: 'even', maxFrames: 1, transcript: false }] },
+    });
+    // Literal path, not read back from the reply's own manifestPath field --
+    // this is checking the actual on-disk LOCATION the N=1 flat layout
+    // promises, independent of whatever the reply claims about itself.
+    expect(existsSync(join(destDir, 'manifest.json'))).toBe(true);
+    await client.close();
+  }, 30_000);
+
+  it('N=2 produces video-1/ and video-2/ with independent manifests', async () => {
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-n2-src-'));
+    // Distinct durations so the two manifests can only agree by actually
+    // being independent, not by one silently overwriting or aliasing the
+    // other (mirrors tests/analyzeTool.test.ts's own N=2 discriminator).
+    const videoA = await makeTestVideo(join(srcDir, 'a.mp4'), 6);
+    const videoB = await makeTestVideo(join(srcDir, 'b.mp4'), 3);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-mcp-n2-'));
+    const client = await connectClient(buildServer());
+    const content = await callToolOk(client, {
+      name: 'analyze_video',
+      arguments: {
+        destinationPath: destDir,
+        videos: [
+          { pathOrUrl: videoA, frames: 'even', maxFrames: 1, transcript: false },
+          { pathOrUrl: videoB, frames: 'even', maxFrames: 1, transcript: false },
+        ],
+      },
+    });
+    const parsed = JSON.parse(firstText(content)) as {
+      videos: Array<{ status: string; manifestPath: string; duration: number }>;
+    };
+    expect(parsed.videos).toHaveLength(2);
+    expect(parsed.videos[0]!.manifestPath).toBe(join(destDir, 'video-1', 'manifest.json'));
+    expect(parsed.videos[1]!.manifestPath).toBe(join(destDir, 'video-2', 'manifest.json'));
+    expect(existsSync(parsed.videos[0]!.manifestPath)).toBe(true);
+    expect(existsSync(parsed.videos[1]!.manifestPath)).toBe(true);
+    expect(parsed.videos[0]!.status).toBe('ok');
+    expect(parsed.videos[1]!.status).toBe('ok');
+    const m1 = JSON.parse(readFileSync(parsed.videos[0]!.manifestPath, 'utf8')) as { source: { duration: number } };
+    const m2 = JSON.parse(readFileSync(parsed.videos[1]!.manifestPath, 'utf8')) as { source: { duration: number } };
+    expect(m1.source.duration).not.toBe(m2.source.duration); // kills the shared-directory mutant
+    await client.close();
+  }, 60_000);
+});
+
+describe('resolve_video is exempt from the analyze pool (spec §6)', () => {
+  it('a metadata-only resolve completes while the cap-1 pool is fully occupied', async () => {
+    // A cap-1 pool whose slot we hold well past resolve_video's own
+    // plain-call floor: EVERY plain call against a taskSupport:'optional'
+    // tool now takes at least ~1 pollInterval (default 1000ms) end to end,
+    // because the server's automatic task-polling wrapper
+    // (handleAutomaticTaskPolling in server/mcp.js -- see task-1-report.md)
+    // sleeps a full pollInterval before its first status check, regardless
+    // of how fast the underlying work actually finishes. HOLD_PAD_MS pads
+    // the REAL analyze work (which may itself finish in well under a
+    // second on a tiny local video with frames:'even', which loads no
+    // vision model) by a further 2500ms after it settles, so the pool slot
+    // stays occupied for a duration that cannot plausibly race
+    // resolve_video's own ~1-1.2s floor, independent of real
+    // pipeline/model-load speed on whatever machine runs this.
+    const HOLD_PAD_MS = 2500;
+    const inner = createSlotPool(1);
+    const pool: SlotPool = {
+      get running() { return inner.running; },
+      get queued() { return inner.queued; },
+      run: (fn, onQueued) => inner.run(async () => {
+        const r = await fn();
+        await new Promise((res) => setTimeout(res, HOLD_PAD_MS));
+        return r;
+      }, onQueued),
+    };
+    const server = buildServer({ analyzeSlots: pool });
+    const client = await connectClient(server);
+
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-exempt-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 3);
+    const analyzeDir = mkdtempSync(join(tmpdir(), 'norma-mcp-exempt-av-'));
+
+    let analyzeDone = false;
+    const analyzePromise = callToolOk(client, {
+      name: 'analyze_video',
+      arguments: { destinationPath: analyzeDir, videos: [{ pathOrUrl: video, frames: 'even', maxFrames: 1, transcript: false }] },
+    }).then((c) => { analyzeDone = true; return c; });
+
+    // Give the detached task executor a moment to synchronously reach
+    // pool.run() (a handful of microtask hops behind createTask's own
+    // await, well under this) and genuinely acquire the slot before this
+    // test goes looking for it -- not a race against the assertions below
+    // (those are protected by HOLD_PAD_MS), just making sure the slot is
+    // demonstrably held first.
+    await new Promise((res) => setTimeout(res, 100));
+    expect(pool.running).toBe(1);
+
+    const resolveDir = mkdtempSync(join(tmpdir(), 'norma-mcp-exempt-rv-'));
+    const resolveContent = await callToolOk(client, {
+      name: 'resolve_video',
+      arguments: { destinationPath: resolveDir, videos: [{ url: video }] },
+    });
+
+    // LOAD-BEARING: pool.running is still 1 (analyze's slot has not been
+    // released) at the moment resolve's call returns. A mutant that routes
+    // resolve_video through the same pool could only return AFTER queueing
+    // behind analyze (cap 1, already fully occupied) and waiting for its
+    // slot to free -- which is exactly what HOLD_PAD_MS makes impossible to
+    // finish before this read, so a routed-through-pool mutant would
+    // observe running:0 here instead. analyzeDone/queued are corroborating,
+    // not load-bearing on their own (a mutant could in principle still
+    // clear queued back to 0 by the time resolve's own poll notices), but
+    // all three failing together is a stronger signal than any one alone.
+    expect(pool.running).toBe(1);
+    expect(analyzeDone).toBe(false);
+    expect(pool.queued).toBe(0);
+
+    const parsed = JSON.parse(firstText(resolveContent)) as { videos: Array<{ status: string }> };
+    expect(parsed.videos[0]!.status).toBe('ok');
+
+    await analyzePromise; // let the held slot drain so the test exits cleanly
+    await client.close();
+  }, 30_000);
+});
+
+describe('plain calls gate through the slot pool (spec §12.2 -- the queue-bypass mutant)', () => {
+  it('two concurrent plain analyze calls on a cap-1 injected pool never overlap', async () => {
+    const events: string[] = [];
+    const inner = createSlotPool(1);
+    const spy: SlotPool = {
+      get running() { return inner.running; }, get queued() { return inner.queued; },
+      run: (fn, onQ) => inner.run(async () => { events.push('start'); const r = await fn(); events.push('end'); return r; }, onQ),
+    };
+    const server = buildServer({ analyzeSlots: spy });
+    const client = await connectClient(server);
+
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-mcp-gate-src-'));
+    const videoA = await makeTestVideo(join(srcDir, 'a.mp4'), 3);
+    const videoB = await makeTestVideo(join(srcDir, 'b.mp4'), 3);
+
+    async function callAnalyze(c: Client, pathOrUrl: string): Promise<CallToolResult['content']> {
+      const dir = mkdtempSync(join(tmpdir(), 'norma-mcp-gate-av-'));
+      return callToolOk(c, {
+        name: 'analyze_video',
+        arguments: { destinationPath: dir, videos: [{ pathOrUrl, frames: 'even', maxFrames: 1, transcript: false }] },
+      });
+    }
+
+    await Promise.all([callAnalyze(client, videoA), callAnalyze(client, videoB)]);
+    expect(events).toEqual(['start', 'end', 'start', 'end']);   // strictly sequential
+    await client.close();
+  }, 30_000);
 });
