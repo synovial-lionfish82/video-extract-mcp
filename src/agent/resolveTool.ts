@@ -158,7 +158,18 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   // the old guard treated a known-absent duration as known, and the spread
   // below would have coalesced that null right back into r.duration's own
   // placeholder, laundering "unknown" into a fake zero under a new type.
-  const durationKnown = typeof r.metadata?.duration === 'number' || returnVideo;
+  //
+  // Fix 7 (local half): resolve()'s bare-local-path branch
+  // (src/resolve/index.ts:29-37) probes the file UNCONDITIONALLY, even on a
+  // metadata-only call -- r.duration is a genuine measurement there, not the
+  // required-by-type placeholder direct.ts/wechat.ts leave it as when they
+  // skip the transfer. `r.platform === 'local'` is that branch's own literal
+  // tag, set nowhere else, so it identifies the branch precisely without
+  // re-deriving isLocalPath from the URL. Direct/WeChat (explicitly out of
+  // scope: they have no cheap metadata layer at all, and omitting duration
+  // rather than inventing one is the honest, deliberate behaviour there)
+  // stay exactly as before -- their own r.platform is 'direct'/'wechat_channels'.
+  const durationKnown = typeof r.metadata?.duration === 'number' || returnVideo || r.platform === 'local';
   return {
     status: 'ok',
     platform: r.platform,

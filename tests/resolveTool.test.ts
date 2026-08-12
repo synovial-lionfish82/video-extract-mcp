@@ -440,4 +440,35 @@ describe('resolveVideoTool', () => {
     const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
     expect(r.duration).toBe(42);
   });
+
+  it('surfaces a locally-probed duration on a metadata-only call for a local source, even though there is no metadata layer (Fix 7)', async () => {
+    // resolve()'s bare-local-path branch (src/resolve/index.ts:29-37) probes
+    // the file UNCONDITIONALLY, even when returnVideo is left false -- unlike
+    // direct.ts/wechat.ts, which only probe when a real transfer happens.
+    // r.duration is a genuine measurement here, not a required-by-type
+    // placeholder, and the pre-fix guard discarded it because neither
+    // r.metadata nor returnVideo was true.
+    resolveMock.mockResolvedValue(ok({
+      platform: 'local', resolvedBy: 'direct', metadata: undefined, duration: 6,
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: '/some/local/video.mp4', destinationPath: dir });
+    expect(r.duration).toBe(6);
+  });
+
+  it('still omits duration for a real direct-URL source on a metadata-only call (Fix 7 stays scoped to local only)', async () => {
+    // The explicit non-goal from the brief: direct.ts/wechat.ts have no
+    // cheap metadata layer at all, and omitting duration rather than
+    // inventing one is the honest, deliberate behaviour there -- only
+    // r.platform === 'local' (resolve()'s bare-local-path branch, set
+    // nowhere else) should ever widen durationKnown. A mutant that widened
+    // the guard beyond that one platform would incorrectly let this through.
+    resolveMock.mockResolvedValue(ok({
+      platform: 'direct', resolvedBy: 'direct', metadata: undefined, duration: 0,
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/direct.mp4', destinationPath: dir });
+    expect(r.duration).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain('"duration"');
+  });
 });
