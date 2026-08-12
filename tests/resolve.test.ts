@@ -10,6 +10,7 @@ import {
 } from '../src/resolve/wechat.js';
 import { makeTestVideo, probe } from '../src/media/ffmpeg.js';
 import { run } from '../src/util/run.js';
+import { fetchToFile } from '../src/util/download.js';
 
 // Passthrough by default (vi.fn wrapping the real implementation) so every
 // other suite in this file -- and makeTestVideo's own ffmpeg calls -- keep
@@ -20,6 +21,15 @@ vi.mock('../src/util/run.js', async (importOriginal) => {
   return { ...real, run: vi.fn(real.run) };
 });
 const realRun = (await vi.importActual<typeof import('../src/util/run.js')>('../src/util/run.js')).run;
+
+// Same passthrough convention as run.js above, for the metadata-only
+// (returnVideo:false) no-transfer tests: DirectMediaResolver and
+// WeChatHeadlessResolver both call fetchToFile for the actual media bytes.
+vi.mock('../src/util/download.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/util/download.js')>();
+  return { ...real, fetchToFile: vi.fn(real.fetchToFile) };
+});
+const realFetchToFile = (await vi.importActual<typeof import('../src/util/download.js')>('../src/util/download.js')).fetchToFile;
 
 describe('classifyYtDlpError', () => {
   it('maps DRM messages to unsupported/drm_protected', () => {
@@ -390,5 +400,261 @@ describe('WeChatHeadlessResolver.resolve() against a stubbed network (hermetic, 
     // as the SINGULAR `exportId` string in step 3 -- the {exportIds:[...]} array form is a
     // documented, previously-hit real bug (business-code 500 from findergetobjecturl).
     expect(capturedObjectUrlBody).toEqual({ exportId: 'export/ABC123' });
+  });
+});
+
+describe('DirectMediaResolver metadata-only mode (returnVideo:false, spec §2.1)', () => {
+  // A real, tiny, ffmpeg-generated MP4 for the one regression test that
+  // needs the transfer to genuinely succeed end-to-end.
+  let fixtureVideo: string;
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'norma-direct-fixture-'));
+    fixtureVideo = await makeTestVideo(join(dir, 'fixture.mp4'), 3);
+  }, 30_000);
+
+  // run/fetchToFile are module-level mocks shared across this whole file
+  // (set up once by the vi.mock calls at the top) -- their .mock.calls
+  // history is NOT reset between tests or describe blocks by vitest's
+  // defaults (this project sets neither clearMocks nor restoreMocks), so
+  // without an explicit clear here, calls from EARLIER suites in this file
+  // (real ffmpeg/yt-dlp/WeChat fixture and end-to-end calls) accumulate
+  // into these call-count assertions. Caught empirically: the first run
+  // showed "not.toHaveBeenCalled()" failing with 13 pre-existing calls,
+  // and the returnVideo:true regression test seeing 2 calls instead of 1
+  // (the extra one left over from the WeChat end-to-end test earlier in
+  // this same file).
+  beforeEach(() => {
+    vi.mocked(run).mockClear();
+    vi.mocked(fetchToFile).mockClear();
+  });
+  afterEach(() => {
+    vi.mocked(run).mockImplementation(realRun);
+    vi.mocked(fetchToFile).mockImplementation(realFetchToFile);
+  });
+
+  it('performs NO network or subprocess transfer for a direct file URL when returnVideo is false', async () => {
+    // Decisive test, not a proxy like "videoPath is undefined": both mocks
+    // THROW if the download-invoking code is ever reached, so a regression
+    // that removes or bypasses the early return fails loudly here, rather
+    // than merely producing a slightly-wrong result shape.
+    vi.mocked(run).mockImplementation(async () => { throw new Error('run() must not be called when returnVideo is false'); });
+    vi.mocked(fetchToFile).mockImplementation(async () => { throw new Error('fetchToFile() must not be called when returnVideo is false'); });
+    const d = new DirectMediaResolver();
+    const workDir = mkdtempSync(join(tmpdir(), 'norma-direct-meta-'));
+    const r = await d.resolve('https://example.com/videos/clip.mp4', { workDir, returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.title).toBe('clip.mp4');
+    expect(vi.mocked(fetchToFile)).not.toHaveBeenCalled();
+    expect(vi.mocked(run)).not.toHaveBeenCalled();
+  });
+
+  it('performs NO network or subprocess transfer for an HLS URL when returnVideo is false', async () => {
+    // The HLS/DASH branch uses run('ffmpeg', ...) instead of fetchToFile --
+    // both must stay unreached, not just the one this URL shape would
+    // normally take.
+    vi.mocked(run).mockImplementation(async () => { throw new Error('run() must not be called when returnVideo is false'); });
+    vi.mocked(fetchToFile).mockImplementation(async () => { throw new Error('fetchToFile() must not be called when returnVideo is false'); });
+    const d = new DirectMediaResolver();
+    const workDir = mkdtempSync(join(tmpdir(), 'norma-direct-meta-'));
+    const r = await d.resolve('https://example.com/stream.m3u8', { workDir, returnVideo: false });
+    expect(r.status).toBe('ok');
+    expect(vi.mocked(run)).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchToFile)).not.toHaveBeenCalled();
+  });
+
+  it('still performs the real transfer when returnVideo is true (regression: opt-out must not become the default)', async () => {
+    vi.mocked(fetchToFile).mockImplementation(async (_url, out) => {
+      copyFileSync(fixtureVideo, out);
+      return { ok: true, status: 200 };
+    });
+    const d = new DirectMediaResolver();
+    const workDir = mkdtempSync(join(tmpdir(), 'norma-direct-meta-'));
+    const r = await d.resolve('https://example.com/videos/clip.mp4', { workDir, returnVideo: true });
+    expect(vi.mocked(fetchToFile)).toHaveBeenCalledTimes(1);
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(existsSync(r.filePath)).toBe(true);
+  });
+
+  it('returns duration:0 and filePath:\'\' as type-satisfying placeholders, not measurements, when returnVideo is false', async () => {
+    // Documents the internal contract resolveVideoTool.ts relies on:
+    // ResolvedMedia.duration/filePath are non-optional, so the resolver
+    // cannot return "unknown" directly here -- it returns a placeholder,
+    // and the agent-facing layer (covered separately in
+    // resolveTool.test.ts) is what turns this into a genuinely absent
+    // field rather than surfacing a fabricated zero.
+    const d = new DirectMediaResolver();
+    const workDir = mkdtempSync(join(tmpdir(), 'norma-direct-meta-'));
+    const r = await d.resolve('https://example.com/videos/clip.mp4', { workDir, returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.duration).toBe(0);
+    expect(r.filePath).toBe('');
+  });
+});
+
+describe('YtDlpResolver metadata-only mode (returnVideo:false, spec §2.1)', () => {
+  let workDir: string;
+  beforeEach(() => { workDir = mkdtempSync(join(tmpdir(), 'norma-ytdlp-meta-')); });
+  afterEach(() => { vi.mocked(run).mockImplementation(realRun); vi.unstubAllGlobals(); });
+
+  const VTT_BODY = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello from captions\n';
+
+  it('passes --skip-download when returnVideo is false -- the actual mechanism, verified against the installed yt-dlp source, that gates the real download branch', async () => {
+    let captured: string[] = [];
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      captured = args;
+      // Deliberately writes NO video file -- --skip-download genuinely
+      // does not produce one (verified against the installed yt-dlp's own
+      // source: the download branch is never entered when it is set).
+      return {
+        stdout: `${JSON.stringify({
+          title: 'T', extractor: 'youtube', duration: 754,
+          subtitles: {}, automatic_captions: {}, requested_subtitles: null,
+        })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir, returnVideo: false });
+    expect(captured).toContain('--skip-download');
+    expect(r.status).toBe('ok');
+  });
+
+  it('omits --skip-download when returnVideo is true or omitted (regression: opt-out must not become the default)', async () => {
+    let captured: string[] = [];
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      captured = args;
+      return {
+        stdout: `${JSON.stringify({ title: 'T', extractor: 'youtube', subtitles: {}, automatic_captions: {}, requested_subtitles: null })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    // This fake writes no video file either, so omitting returnVideo here
+    // surfaces as an honest 'yt-dlp produced no media file' failure -- the
+    // assertion under test is purely about the FLAG, not this fake's
+    // fidelity to a real download.
+    await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir });
+    expect(captured).not.toContain('--skip-download');
+  });
+
+  it('returns metadata using the info dict duration, without requiring any produced media file, when returnVideo is false', async () => {
+    // Decisive: if the !wantsDownload branch were removed or bypassed,
+    // this falls through to the readdirSync/produced-file check further
+    // down, which finds nothing (this fake writes no video file) and
+    // returns extractor_failed instead of ok.
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      return {
+        stdout: `${JSON.stringify({
+          title: 'Metadata Only', extractor: 'youtube', duration: 754,
+          subtitles: {}, automatic_captions: {}, requested_subtitles: null,
+        })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir, returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.duration).toBe(754);
+    expect(r.metadata?.duration).toBe(754);
+    expect(r.filePath).toBe('');
+  });
+
+  it('still returns real, honest captions when returnVideo is false (subtitle files ARE written even with --skip-download, verified against yt-dlp source)', async () => {
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      writeFileSync(join(workDir, 'source.en.vtt'), VTT_BODY);
+      return {
+        stdout: `${JSON.stringify({
+          title: 'T', extractor: 'youtube', language: 'en', duration: 42,
+          subtitles: { en: [{ ext: 'vtt', url: 'https://x/en' }] },
+          automatic_captions: {}, requested_subtitles: { en: { ext: 'vtt' } },
+        })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    const r = await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', { workDir, returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.captions.manual).not.toBeNull();
+    expect(r.captions.manual!.language).toBe('en');
+    expect(readFileSync(r.captions.manual!.path, 'utf8')).toBe(VTT_BODY);
+  });
+
+  it('does not request a download-sections range when returnVideo is false, even if start/end are both given directly', async () => {
+    let captured: string[] = [];
+    vi.mocked(run).mockImplementation(async (cmd, args, opts) => {
+      if (cmd !== 'yt-dlp') return realRun(cmd, args, opts);
+      captured = args;
+      return {
+        stdout: `${JSON.stringify({
+          title: 'T', extractor: 'youtube', duration: 500,
+          subtitles: {}, automatic_captions: {}, requested_subtitles: null,
+        })}\n`,
+        stderr: '', code: 0,
+      };
+    });
+    await new YtDlpResolver().resolve('https://www.youtube.com/watch?v=abc', {
+      workDir, returnVideo: false, start: 10, end: 20,
+    });
+    expect(captured).not.toContain('--download-sections');
+  });
+});
+
+describe('WeChatHeadlessResolver metadata-only mode (returnVideo:false, spec §2.1)', () => {
+  beforeEach(() => { vi.stubEnv('NORMA_WECHAT_COOKIE', 'sessionid=test-fixture-cookie'); });
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+
+  it('performs NO network activity at all when returnVideo is false, even with a valid credential present', async () => {
+    // Decisive: fetch THROWS if called at all, so any of the three staged
+    // API calls (getuserinfo/parse/object-url) being reached fails this
+    // loudly -- not just the final media download, which is the ONLY step
+    // direct.ts's sibling case has to worry about.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('fetch() must not be called when returnVideo is false'); }));
+    const w = new WeChatHeadlessResolver();
+    const r = await w.resolve('https://weixin.qq.com/sph/Axv548mzBF', { workDir: '/tmp', returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.title).toBe('WeChat video Axv548mzBF');
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('still requires a credential even when returnVideo is false (a free, URL/env-only check, not gated on downloading)', async () => {
+    vi.stubEnv('NORMA_WECHAT_COOKIE', '');
+    const w = new WeChatHeadlessResolver();
+    const r = await w.resolve('https://weixin.qq.com/sph/abc', { workDir: '/tmp', returnVideo: false });
+    expect(r.status).toBe('auth_required');
+  });
+
+  it('returns duration:0, filePath:\'\' and rangeApplied:false as placeholders when returnVideo is false', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('fetch() must not be called'); }));
+    const w = new WeChatHeadlessResolver();
+    const r = await w.resolve('https://weixin.qq.com/sph/abc', { workDir: '/tmp', returnVideo: false });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.duration).toBe(0);
+    expect(r.filePath).toBe('');
+    expect(r.rangeApplied).toBe(false);
+    // Documented platform prior -- costs nothing to keep, unlike duration.
+    expect(r.languageHint).toBe('zh');
+  });
+
+  it('still performs real network calls when returnVideo is true (regression: opt-out must not become the default)', async () => {
+    let fetchCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      fetchCalls += 1;
+      const url = input.toString();
+      if (url.includes('/api/getuserinfo')) return new Response('{}', { status: 200 });
+      if (url.includes('/api/weixin/get_parse_result')) {
+        return new Response(JSON.stringify({ code: 0, msg: 'success', data: { wx_export_id: 'x1' } }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }));
+    const w = new WeChatHeadlessResolver();
+    await w.resolve('https://weixin.qq.com/sph/abc', { workDir: '/tmp', returnVideo: true });
+    expect(fetchCalls).toBeGreaterThan(0);
   });
 });

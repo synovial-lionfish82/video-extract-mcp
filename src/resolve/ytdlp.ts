@@ -195,6 +195,12 @@ export class YtDlpResolver implements VideoResolver {
   canResolve(url: string): boolean { return /^https?:\/\//i.test(url); }
 
   async resolve(url: string, opts: ResolveOptions): Promise<ResolveResult> {
+    // Spec §2.1: metadata-only is the default. resolveVideoTool always
+    // sends an explicit boolean; analyze.ts never sets this field at all
+    // (it always wants the media), so the default must be "download" --
+    // only an explicit `false` skips the transfer.
+    const wantsDownload = opts.returnVideo !== false;
+
     const out = join(opts.workDir, 'source.%(ext)s');
     const args = [
       '--no-playlist', '--no-warnings',
@@ -207,8 +213,28 @@ export class YtDlpResolver implements VideoResolver {
       '-o', out,
     ];
 
-    // Range download is an OPTIMIZATION, never a guarantee (spec §18).
-    const wantsRange = opts.start !== undefined && opts.end !== undefined;
+    if (!wantsDownload) {
+      // Verified directly against the installed yt-dlp's own source
+      // (YoutubeDL.py, process_info): `simulate` and `skip_download` are
+      // independent params. `simulate` (what --print-json implies unless
+      // --no-simulate is passed, hence that flag staying unconditional
+      // above) short-circuits BEFORE ANY file is written -- subtitles,
+      // thumbnails, infojson, the video itself, all of it:
+      //   if self.params.get('simulate'): ...; return
+      //   ... (subtitle/thumbnail/infojson writes happen here) ...
+      //   if self.params.get('skip_download'): <file-move bookkeeping, no fetch>
+      //   else: # Download
+      // `skip_download` alone only skips the LAST branch (the actual
+      // video/audio byte transfer); `_write_subtitles` and the JSON print
+      // both still run normally before it. So --skip-download here is what
+      // keeps captions genuinely real while skipping the one genuinely
+      // expensive step.
+      args.push('--skip-download');
+    }
+
+    // Range download is an OPTIMIZATION, never a guarantee (spec §18), and
+    // only meaningful when a download is actually happening.
+    const wantsRange = wantsDownload && opts.start !== undefined && opts.end !== undefined;
     if (wantsRange) {
       args.push('--download-sections', `*${opts.start}-${opts.end}`, '--force-keyframes-at-cuts');
     }
@@ -223,6 +249,34 @@ export class YtDlpResolver implements VideoResolver {
     const lastJson = r.stdout.trim().split('\n').filter((l) => l.startsWith('{')).pop();
     if (lastJson) { try { meta = JSON.parse(lastJson) as YtDlpMeta; } catch { /* metadata is optional */ } }
 
+    const manual = pickManualCaption(opts.workDir, meta, opts.preferredLanguage);
+    let auto: CaptionTrack | null = null;
+    if (!manual) {
+      // chooseCaptionTier never consults auto when a manual track exists, so
+      // the fetch is only worth its network cost in the manual-less case.
+      const track = pickAutoTrack(meta, opts.preferredLanguage);
+      if (track) auto = await downloadAutoTrack(track, meta.http_headers, opts.workDir);
+    }
+
+    if (!wantsDownload) {
+      // No file was ever fetched, so there is nothing to probe() --
+      // duration comes from the extractor's own metadata instead. Verified
+      // against the installed yt-dlp's youtube extractor
+      // (extractor/youtube/_video.py, _real_extract): duration is scraped
+      // from video_details/microformats DURING EXTRACTION, wholly
+      // independent of the download step, so it is genuine here, not
+      // fabricated. filePath is a placeholder: resolveVideoTool never
+      // dereferences it unless returnVideo is true.
+      return {
+        status: 'ok', filePath: '', platform: meta.extractor ?? 'unknown',
+        title: meta.title ?? 'video', duration: meta.duration ?? 0, resolvedBy: 'ytdlp',
+        captions: { manual, auto },
+        languageHint: meta.language ?? null,
+        rangeApplied: false,
+        metadata: toVideoMetadata(meta),
+      };
+    }
+
     const produced = readdirSync(opts.workDir).find((f) => /^source\.(mp4|mkv|webm|m4v)$/.test(f));
     if (!produced) return { status: 'extractor_failed', message: 'yt-dlp produced no media file', resolvedBy: 'ytdlp' };
     const filePath = join(opts.workDir, produced);
@@ -233,15 +287,6 @@ export class YtDlpResolver implements VideoResolver {
     if (wantsRange) {
       const expected = opts.end! - opts.start!;
       rangeApplied = Math.abs(p.duration - expected) <= Math.max(1.5, expected * 0.15);
-    }
-
-    const manual = pickManualCaption(opts.workDir, meta, opts.preferredLanguage);
-    let auto: CaptionTrack | null = null;
-    if (!manual) {
-      // chooseCaptionTier never consults auto when a manual track exists, so
-      // the fetch is only worth its network cost in the manual-less case.
-      const track = pickAutoTrack(meta, opts.preferredLanguage);
-      if (track) auto = await downloadAutoTrack(track, meta.http_headers, opts.workDir);
     }
 
     return {

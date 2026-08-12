@@ -12,6 +12,22 @@ export class DirectMediaResolver implements VideoResolver {
   canResolve(url: string): boolean { return MEDIA_EXT.test(url); }
 
   async resolve(url: string, opts: ResolveOptions): Promise<ResolveResult> {
+    if (opts.returnVideo === false) {
+      // No metadata layer exists for a direct media URL (unlike yt-dlp,
+      // there is no separate extraction/info step): the URL IS the media,
+      // so the only way to learn anything -- even whether it is reachable
+      // -- is to fetch it. Do not download just to populate fields; return
+      // only what the URL string itself yields. duration:0/filePath:'' are
+      // ResolvedMedia's required-by-type placeholders, not measurements --
+      // resolveVideoTool.ts never dereferences filePath, and omits
+      // duration from the agent-facing reply, when no transfer happened.
+      return {
+        status: 'ok', filePath: '', platform: 'direct',
+        title: url.split('/').pop() ?? 'video', duration: 0,
+        resolvedBy: 'direct', captions: { manual: null, auto: null },
+        languageHint: null, rangeApplied: false,
+      };
+    }
     const out = join(opts.workDir, 'source.mp4');
     try {
       // HLS/DASH manifests must be muxed by ffmpeg, not byte-copied. Bounded

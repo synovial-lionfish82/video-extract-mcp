@@ -291,6 +291,27 @@ export class WeChatHeadlessResolver implements VideoResolver {
       };
     }
 
+    if (opts.returnVideo === false) {
+      // No metadata layer exists here without spending the parse/object-url
+      // API calls below -- and even those never expose a duration
+      // (verified: extractParsedExport/extractVideoUrl further down read
+      // only exportId/title/author/mediaUrl, never a length field,
+      // anywhere in the wire protocol this resolver speaks). Treated the
+      // same as direct.ts's sibling no-metadata-layer case for
+      // consistency: skip ALL network activity here, not just the final
+      // byte transfer, and return only what the URL structure itself
+      // yields (its share id). languageHint stays 'zh' -- a documented
+      // PLATFORM prior (see download() below), not a per-video
+      // measurement, so it costs nothing to keep.
+      const shareId = parseShareLink(url)?.shareId;
+      return {
+        status: 'ok', filePath: '', platform: 'wechat_channels',
+        title: shareId ? `WeChat video ${shareId}` : 'WeChat video', duration: 0,
+        resolvedBy: 'wechat', captions: { manual: null, auto: null },
+        languageHint: 'zh', rangeApplied: false,
+      };
+    }
+
     // Stage 1 (verified): probe credential validity before spending a resolve call on it.
     // A network hiccup on the probe itself is non-fatal -- fall through to the real calls.
     const probeRes = await callApi(USER_INFO_URL, cookie);

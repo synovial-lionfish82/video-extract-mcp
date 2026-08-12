@@ -311,4 +311,33 @@ describe('resolveVideoTool', () => {
     expect(typeof r.metadataPath).toBe('string');
     expect(r.videoPath).toBeUndefined();
   });
+
+  it('omits duration when the resolver has no metadata layer and no media was fetched (design: absent, not zero)', async () => {
+    // direct.ts/wechat.ts return duration:0 as a required-by-type
+    // placeholder when they skip the transfer -- resolveTool.ts must not
+    // let that reach the agent looking like a real zero-length video.
+    resolveMock.mockResolvedValue(ok({ metadata: undefined, duration: 0 }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
+    expect(r.duration).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain('"duration"');
+  });
+
+  it('still surfaces duration when the resolver metadata provides it, even though media was not fetched', async () => {
+    // yt-dlp's metadata-only path DOES have a real duration (from the info
+    // dict) -- this must not be swept up by the same guard.
+    resolveMock.mockResolvedValue(ok()); // default metadata.duration: 100
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir });
+    expect(r.duration).toBe(100);
+  });
+
+  it('still surfaces duration from a real probe when media WAS fetched, even with no metadata layer', async () => {
+    // direct.ts/wechat.ts with returnVideo:true: no r.metadata, but
+    // r.duration IS a genuine probed value this time and must come through.
+    resolveMock.mockResolvedValue(ok({ metadata: undefined, duration: 42 }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: 'https://x/v', destinationPath: dir, returnVideo: true });
+    expect(r.duration).toBe(42);
+  });
 });

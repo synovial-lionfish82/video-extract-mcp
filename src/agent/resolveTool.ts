@@ -104,16 +104,27 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   }
 
   const clipped = appliedStart !== undefined && appliedEnd !== undefined;
+  // direct/wechat have no metadata layer (neither resolver ever populates
+  // r.metadata) -- when no transfer happened (returnVideo false), their
+  // top-level r.duration is an unavoidable required-by-type placeholder
+  // (0), not a measurement, and must not reach the agent looking like one
+  // (design: "absent, not zero or empty-string"). yt-dlp's
+  // r.metadata.duration is genuine even without downloading (verified
+  // against the installed yt-dlp's own extractor source: duration is
+  // scraped during extraction, independent of the download step), so it
+  // is trusted whenever present; r.duration itself is only trusted when a
+  // real file was actually fetched and probed (returnVideo true).
+  const durationKnown = r.metadata?.duration !== undefined || returnVideo;
   return {
     status: 'ok',
     platform: r.platform,
     title: r.metadata?.title ?? r.title,
     creator: r.metadata?.creator ?? null,
-    duration: r.metadata?.duration ?? r.duration,
     chapters: r.metadata?.chapters ?? [],
     descriptionPreview: descriptionPreview(r.metadata?.description ?? null),
     commentCount: r.metadata?.commentCount ?? null,
     metadataPath,
+    ...(durationKnown ? { duration: r.metadata?.duration ?? r.duration } : {}),
     ...(videoPath ? { videoPath } : {}),
     ...(clipped ? { clipStart: appliedStart, clipEnd: appliedEnd } : {}),
     ...(returnVideo ? {} : {
