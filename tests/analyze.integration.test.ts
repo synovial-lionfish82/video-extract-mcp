@@ -166,6 +166,25 @@ describe('analyzeVideo (local file, end to end)', () => {
     expect(frames.every((f) => existsSync(f) && statSync(f).size > 0)).toBe(true);
   }, 120_000);
 
+  it('never calls extractAudio() when transcript is false (spec §8 cost, independent of cleanup)', async () => {
+    // The file-existence assertions in analyzeShortcircuit cannot see this
+    // anymore: Fix 6 deletes work.wav unconditionally once the transcript
+    // stage is done, so "no work.wav on disk afterwards" is now true whether
+    // or not the WAV was ever extracted. A reviewer's mutation proved it --
+    // hoisting extractAudio() back out of the transcript gate, paired with
+    // that cleanup, passed all 33 tests in the two integration suites while
+    // silently reinstating the whole per-second cost spec §8 forbids.
+    // Spying on the call itself is the only timing-free assertion that
+    // survives the cleanup, which is why it lives here (this suite wraps
+    // ffmpeg) rather than beside its file-existence siblings.
+    vi.mocked(extractAudio).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'norma-e2e-noaudio-'));
+    const v = await makeTestVideo(join(dir, 'v.mp4'), 9);
+    const m = await analyzeVideo(v, { maxFrames: 2, transcript: false, outDir: join(dir, 'out') });
+    expect(m.source.status).toBe('ok');
+    expect(extractAudio).not.toHaveBeenCalled();
+  }, 120_000);
+
   it('respects the maxFrames budget when more candidates survive than the budget allows', async () => {
     // Mocked embed (fast, deterministic) -- this test is about the budget
     // wiring, not embedding correctness, so it doesn't need the real worker.

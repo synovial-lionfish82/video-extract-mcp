@@ -169,7 +169,14 @@ async function resolveVideoToolAttempt(args: ResolveToolArgs): Promise<ResolveTo
   // scope: they have no cheap metadata layer at all, and omitting duration
   // rather than inventing one is the honest, deliberate behaviour there)
   // stay exactly as before -- their own r.platform is 'direct'/'wechat_channels'.
-  const durationKnown = typeof r.metadata?.duration === 'number' || returnVideo || r.platform === 'local';
+  // `r.duration > 0`, not `r.platform === 'local'` alone: ffprobe reads some
+  // containers (raw .h264 and other bare bitstreams) without reporting a
+  // format duration, and resolve()'s local branch then leaves r.duration at
+  // its required-by-type 0. Trusting the platform tag by itself put that 0
+  // back into the reply as a measured fact -- reinstating, for local files,
+  // exactly the laundering the Fix B comment above exists to prevent.
+  const durationKnown = typeof r.metadata?.duration === 'number' || returnVideo
+    || (r.platform === 'local' && r.duration > 0);
   return {
     status: 'ok',
     platform: r.platform,

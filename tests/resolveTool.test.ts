@@ -456,6 +456,23 @@ describe('resolveVideoTool', () => {
     expect(r.duration).toBe(6);
   });
 
+  it('omits duration for a local file ffprobe could not measure, rather than reporting 0 as a fact', async () => {
+    // ffprobe reads some containers (raw .h264 and other bare bitstreams)
+    // without reporting a format duration, and resolve()'s local branch then
+    // leaves r.duration at its required-by-type 0. Trusting r.platform ===
+    // 'local' on its own republished that 0 as a measurement -- reinstating,
+    // for local files, the exact laundering Fix B removed for yt-dlp.
+    // Assert ABSENCE, not falsiness: toBe(0) and toBeFalsy() both pass
+    // against the unfixed guard.
+    resolveMock.mockResolvedValue(ok({
+      platform: 'local', resolvedBy: 'direct', metadata: undefined, duration: 0,
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'norma-rt-'));
+    const r = await resolveVideoTool({ url: '/some/bare/stream.h264', destinationPath: dir });
+    expect(r.status).toBe('ok');
+    expect('duration' in r).toBe(false);
+  });
+
   it('still omits duration for a real direct-URL source on a metadata-only call (Fix 7 stays scoped to local only)', async () => {
     // The explicit non-goal from the brief: direct.ts/wechat.ts have no
     // cheap metadata layer at all, and omitting duration rather than
