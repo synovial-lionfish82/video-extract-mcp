@@ -146,21 +146,22 @@ class TaskCancelledError extends Error {
 }
 
 /**
- * Final whole-branch review, Critical finding 1: reaches into
- * InMemoryTaskStore's own private `cleanupTimers: Map<string, NodeJS.Timeout>`
- * bookkeeping (verified against the installed SDK, node_modules/
- * @modelcontextprotocol/sdk/dist/esm/experimental/tasks/stores/in-memory.js
- * -- `private` in the SDK's own .d.ts, so this needs a cast). Deliberately
- * the narrowest, most stable thing available to depend on: a plain identity
- * map whose existence the class's own public `cleanup()` method already
- * implies, versus the alternative of mutating the *returned* Task's `.ttl`
- * field and relying on it being the SAME object reference the store keeps
- * internally -- an aliasing detail `getTask`'s own defensive
- * `{ ...stored.task }` copy shows is not a contract this same file
- * otherwise honors. If this field is ever renamed, every call below fails
- * loudly (TypeError on the very next task creation) rather than silently
- * reverting to the old, wrong behavior -- worth knowing given the SDK's
- * `@experimental` tag on this whole module.
+ * Shared by BOTH the Critical-1 (premature-expiry) and Important-3
+ * (zombie-process) final-whole-branch-review fixes on HonestCancelStore
+ * below: reaches into InMemoryTaskStore's own private `cleanupTimers:
+ * Map<string, NodeJS.Timeout>` bookkeeping (verified against the installed
+ * SDK, node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/
+ * stores/in-memory.js -- `private` in the SDK's own .d.ts, so this needs a
+ * cast). Deliberately the narrowest, most stable thing available to depend
+ * on: a plain identity map whose existence the class's own public
+ * `cleanup()` method already implies, versus the alternative of mutating
+ * the *returned* Task's `.ttl` field and relying on it being the SAME
+ * object reference the store keeps internally -- an aliasing detail
+ * `getTask`'s own defensive `{ ...stored.task }` copy shows is not a
+ * contract this same file otherwise honors. If this field is ever renamed,
+ * every call below fails loudly (TypeError on the very next task creation)
+ * rather than silently reverting to the old, wrong behavior -- worth
+ * knowing given the SDK's `@experimental` tag on this whole module.
  */
 function cleanupTimerFor(store: InMemoryTaskStore, taskId: string): NodeJS.Timeout | undefined {
   return (store as unknown as { cleanupTimers: Map<string, NodeJS.Timeout> }).cleanupTimers.get(taskId);
@@ -215,6 +216,37 @@ class HonestCancelStore extends InMemoryTaskStore {
     return task;
   }
 
+  // Final whole-branch review, IMPORTANT finding 3: every cleanup timer the
+  // base class arms is a plain, ref'd setTimeout, which alone keeps the
+  // Node event loop -- and so the whole stdio server process -- alive
+  // until it fires (default ttl 30 minutes). A session that made even one
+  // call otherwise lingers for the full TTL after stdin EOF, for no reason
+  // a client could ever observe or benefit from (reviewer probe:
+  // scratch/probe5-linger.mjs -- no call exits ~102ms; one call at the
+  // default TTL is still alive at 12s).
+  //
+  // A transport/server-close hook (Protocol's own public `onclose`,
+  // reachable uncast via `server.server.onclose` -- see buildServer below)
+  // was the other option the review named, and was tried first. It does
+  // NOT work for this pinned SDK: confirmed both by reading
+  // StdioServerTransport (server/stdio.js), which registers only
+  // 'data'/'error' listeners on stdin and NEVER 'end' or 'close', and
+  // empirically (scratch/onclose-probe.mjs -- server.server.onclose is set,
+  // stdin is closed, and it never fires). Nothing in the pinned SDK calls
+  // the transport's own close() -- and so nothing ever invokes `onclose` --
+  // on a clean stdio EOF at all; only a read-buffer parse error reaches it.
+  // That rules out a close-hook fix for this specific SDK/transport
+  // combination, leaving unref as the only fix that actually reaches the
+  // real bug. `.unref()` only affects whether a timer can keep an
+  // otherwise-idle process alive on its own -- it still fires normally, on
+  // schedule, in any process (a test run, a future non-stdio transport)
+  // that has other work keeping its event loop open anyway, so this cannot
+  // change *when* a handle expires, only whether a fully-idle process waits
+  // around for it.
+  private unrefCleanupTimer(taskId: string): void {
+    cleanupTimerFor(this, taskId)?.unref();
+  }
+
   override async updateTaskStatus(
     taskId: string, status: Parameters<InMemoryTaskStore['updateTaskStatus']>[1],
     statusMessage?: string, sessionId?: string,
@@ -222,7 +254,21 @@ class HonestCancelStore extends InMemoryTaskStore {
     if (status === 'cancelled' && this.executing.has(taskId)) {
       throw new Error("this task's work has already started and cannot be cancelled; it will finish and deliver its result");
     }
-    return super.updateTaskStatus(taskId, status, statusMessage, sessionId);
+    await super.updateTaskStatus(taskId, status, statusMessage, sessionId);
+    this.unrefCleanupTimer(taskId);
+  }
+
+  // The base class's OTHER terminal-transition entry point (the one this
+  // file's own createTask handlers call directly on every successful
+  // completion or failure) -- it re-arms a cleanup timer exactly like
+  // updateTaskStatus's terminal branch does, so it needs the identical
+  // unref treatment.
+  override async storeTaskResult(
+    taskId: string, status: Parameters<InMemoryTaskStore['storeTaskResult']>[1],
+    result: Parameters<InMemoryTaskStore['storeTaskResult']>[2], sessionId?: string,
+  ): Promise<void> {
+    await super.storeTaskResult(taskId, status, result, sessionId);
+    this.unrefCleanupTimer(taskId);
   }
 }
 
