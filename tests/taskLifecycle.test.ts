@@ -308,26 +308,113 @@ describe('task lifecycle (spec §7-§9)', () => {
     await client.close();
   }, 30_000);
 
+  it('a plain call whose work outlives a short TTL still succeeds and delivers (final review, Critical 1 regression)', async () => {
+    // Direct regression test for the final whole-branch review's Critical
+    // finding 1, reproducing its own probe (scratch/probe2-ttl-inflight.ts,
+    // case (a)) almost exactly: TTL 1.5s, real work padded to ~4s. PRE-FIX,
+    // InMemoryTaskStore.createTask armed its cleanup setTimeout at CREATION
+    // time -- with a TTL shorter than the real work, that timer fired and
+    // deleted the task row out from under the still-running executor
+    // *before* storeTaskResult('completed', ...) ever ran. The SDK's
+    // automatic-polling bridge (handleAutomaticTaskPolling, server/mcp.js)
+    // then hit a genuine "Task not found" on its next getTask() poll and
+    // surfaced that as a rejection/error to the plain caller -- for work
+    // that went on to succeed and write a correct manifest to disk seconds
+    // later. HonestCancelStore.createTask (src/mcp.ts) now prevents that
+    // pre-completion timer from ever being armed in the first place, so
+    // this must complete normally regardless of how the configured TTL and
+    // the real work's duration compare.
+    const TTL_MS = 1500;
+    vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', String(TTL_MS));
+    const pool = paddedCap1Pool(4000); // real work + pad comfortably outlives TTL_MS above
+    const server = buildServer({ analyzeSlots: pool });
+    const client = await connectClient(server);
+
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-lifecycle-ttl-inflight-plain-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 3);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-lifecycle-ttl-inflight-plain-'));
+
+    const plainResult = (await client.callTool({
+      name: 'analyze_video',
+      arguments: { destinationPath: destDir, videos: [itemFor(video)] },
+    })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+    // Pre-fix this was isError:true with a "Task not found" message, even
+    // though the manifest below was written correctly -- the handle was
+    // deleted mid-flight while the work was still genuinely running.
+    expect(plainResult.isError).not.toBe(true);
+    const parsed = JSON.parse(plainResult.content[0]!.text) as {
+      videos: Array<{ status: string; manifestPath: string }>;
+    };
+    expect(parsed.videos[0]!.status).toBe('ok');
+    expect(existsSync(parsed.videos[0]!.manifestPath)).toBe(true);
+
+    await client.close();
+  }, 30_000);
+
+  it('a task call whose work outlives a short TTL still reaches completed and delivers (final review, Critical 1 regression, task-augmented path)', async () => {
+    // Same scenario as the plain-call regression above (probe2-ttl-inflight.ts
+    // case (b)), but through callToolStream so the terminal status is
+    // directly observable -- the OTHER half of Critical finding 1: pre-fix,
+    // the task never reached a terminal state at all (the stream threw
+    // mid-poll instead of ever yielding 'result'). Asserts the SHAPE
+    // (taskCreated -> ... -> completed -> result), matching this file's own
+    // "full lifecycle" test above, rather than an exact message count.
+    const TTL_MS = 1500;
+    vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', String(TTL_MS));
+    const pool = paddedCap1Pool(4000); // real work + pad comfortably outlives TTL_MS above
+    const server = buildServer({ analyzeSlots: pool });
+    const client = await connectClient(server);
+
+    const srcDir = mkdtempSync(join(tmpdir(), 'norma-lifecycle-ttl-inflight-task-src-'));
+    const video = await makeTestVideo(join(srcDir, 'v.mp4'), 3);
+    const destDir = mkdtempSync(join(tmpdir(), 'norma-lifecycle-ttl-inflight-task-'));
+
+    const seen: string[] = [];
+    let finalContent: Array<{ type: string; text: string }> | undefined;
+    const stream = client.experimental.tasks.callToolStream({
+      name: 'analyze_video',
+      arguments: { destinationPath: destDir, videos: [itemFor(video)] },
+    }) as AsyncGenerator<StreamMsg>;
+    for await (const msg of stream) {
+      seen.push(msg.type === 'taskStatus' ? `taskStatus:${msg.task!.status}` : msg.type);
+      if (msg.type === 'result') finalContent = msg.result!.content;
+    }
+
+    // Pre-fix this stream threw "Task not found" mid-poll instead of ever
+    // reaching this shape -- the task's own row was gone before the
+    // executor's storeTaskResult('completed', ...) call ever ran.
+    expect(seen[seen.length - 2]).toBe('taskStatus:completed');
+    expect(seen[seen.length - 1]).toBe('result');
+    expect(finalContent).toBeDefined();
+    const parsed = JSON.parse(finalContent![0]!.text) as {
+      videos: Array<{ status: string; manifestPath: string }>;
+    };
+    expect(parsed.videos[0]!.status).toBe('ok');
+    expect(existsSync(parsed.videos[0]!.manifestPath)).toBe(true);
+
+    await client.close();
+  }, 30_000);
+
   it('TTL expires the HANDLE, never the files (kills the TTL-deletes-files mutant)', async () => {
-    // BRIEF DEVIATION (recorded per task instructions -- observed SDK
-    // behavior wins): the brief's skeleton suggests TTL_MS=200. Empirically
-    // (and confirmed by reading InMemoryTaskStore's source, dist/esm/
-    // experimental/tasks/stores/in-memory.js), storeTaskResult/
-    // updateTaskStatus RESET the cleanup timer to start counting from
-    // completion, not from task creation -- but the ORIGINAL,
-    // pre-completion timer (started at createTask time) still races the
-    // real analyze work. At 200ms that original timer can fire BEFORE a
-    // real (if tiny) local-video analysis finishes, deleting the task row
-    // out from under the still-running executor: storeTaskResult('completed')
-    // then throws "Task ... not found" (swallowed by this file's own
-    // just-added inner try/catch, same as an honest cancellation race), the
-    // task never observably reaches 'completed', and the client's own poll
-    // loop -- gated behind a genuine ~1000ms pollInterval, task-1-report.md
-    // fact (b) -- throws mid-stream instead of ever seeing 'result'. A TTL
-    // comfortably longer than that ~1000ms poll gap (2500ms here, matching
-    // this codebase's own HOLD_PAD_MS precedent for "definitely done by
-    // then") avoids that race while still being far short of the 30-minute
-    // default, so the test doesn't need to wait 30 minutes to observe expiry.
+    // Final whole-branch review, Critical finding 1: this test now only
+    // has to worry about the POST-completion expiry window. Pre-fix, the
+    // brief's own skeleton suggested TTL_MS=200, which didn't work for a
+    // different reason -- the ORIGINAL, pre-completion cleanup timer
+    // (armed at createTask time) raced the real analyze work directly: at
+    // 200ms that timer could fire BEFORE a real (if tiny) local-video
+    // analysis finished, deleting the task row out from under the
+    // still-running executor and never letting the task reach 'completed'
+    // at all. HonestCancelStore.createTask (src/mcp.ts) now prevents that
+    // pre-completion timer from ever being armed in the first place (see
+    // the two regression tests directly above, which pin exactly this), so
+    // TTL_MS's only remaining job here is to give the POST-completion
+    // reset window (storeTaskResult/updateTaskStatus's own re-arm, counting
+    // from completion -- see in-memory.js) something short enough to wait
+    // out without this test needing to sleep for the real 30-minute
+    // default. 2500ms is not load-bearing against any race any more; it is
+    // simply comfortably longer than the real (tiny) analyze work and this
+    // codebase's own HOLD_PAD_MS precedent for "long enough to be dull".
     const TTL_MS = 2500;
     vi.stubEnv('VIDEO_EXTRACT_TASK_TTL_MS', String(TTL_MS));
     const server = buildServer();

@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { InMemoryTaskStore } from '@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, Task } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { analyzeVideoTool, type AnalyzeToolArgs } from './agent/analyzeTool.js';
 import { resolveVideoTool, type ResolveToolArgs } from './agent/resolveTool.js';
@@ -145,12 +145,76 @@ class TaskCancelledError extends Error {
   constructor() { super('task was cancelled before this item started'); this.name = 'TaskCancelledError'; }
 }
 
+/**
+ * Final whole-branch review, Critical finding 1: reaches into
+ * InMemoryTaskStore's own private `cleanupTimers: Map<string, NodeJS.Timeout>`
+ * bookkeeping (verified against the installed SDK, node_modules/
+ * @modelcontextprotocol/sdk/dist/esm/experimental/tasks/stores/in-memory.js
+ * -- `private` in the SDK's own .d.ts, so this needs a cast). Deliberately
+ * the narrowest, most stable thing available to depend on: a plain identity
+ * map whose existence the class's own public `cleanup()` method already
+ * implies, versus the alternative of mutating the *returned* Task's `.ttl`
+ * field and relying on it being the SAME object reference the store keeps
+ * internally -- an aliasing detail `getTask`'s own defensive
+ * `{ ...stored.task }` copy shows is not a contract this same file
+ * otherwise honors. If this field is ever renamed, every call below fails
+ * loudly (TypeError on the very next task creation) rather than silently
+ * reverting to the old, wrong behavior -- worth knowing given the SDK's
+ * `@experimental` tag on this whole module.
+ */
+function cleanupTimerFor(store: InMemoryTaskStore, taskId: string): NodeJS.Timeout | undefined {
+  return (store as unknown as { cleanupTimers: Map<string, NodeJS.Timeout> }).cleanupTimers.get(taskId);
+}
+
 /** Spec §8: cancellation is honest or absent. Queued tasks cancel fully;
  *  a task whose work has started refuses -- a task that reports cancelled
  *  while quietly finishing its download is exactly the dishonesty class
  *  this project exists to kill. */
 class HonestCancelStore extends InMemoryTaskStore {
   readonly executing = new Set<string>();
+
+  // Final whole-branch review, CRITICAL finding 1: the base class's own
+  // createTask (in-memory.js) arms its cleanup timer AT CREATION, before
+  // any real work has run -- a task whose work outlives the configured ttl
+  // (default 30 minutes; reachable by one long analysis or a batch queued
+  // behind the concurrency cap) had its row deleted MID-FLIGHT:
+  // storeTaskResult('completed', ...) then throws "Task ... not found"
+  // (swallowed by this file's own inner try/catch, same as a genuine
+  // cancellation race), the task never reaches a terminal state, and a
+  // plain caller sees "Task not found" for work that went on to succeed on
+  // disk seconds later (reviewer probe: scratch/probe2-ttl-inflight.ts,
+  // TTL 1.5s vs 4s of work). Spec §9 is explicit that the handle's lifetime
+  // counts from COMPLETION, not creation -- storeTaskResult and
+  // updateTaskStatus already implement exactly that re-arm-on-terminal-
+  // transition behavior (untouched below), so this override's only job is
+  // to stop the ORIGINAL, pre-completion timer from ever being armed.
+  //
+  // The base class's createTask body is entirely synchronous (no `await`
+  // anywhere in it, despite being declared `async`), so by the time
+  // `super.createTask()`'s returned promise settles, the timer this method
+  // is about to cancel has already been registered in cleanupTimers, with
+  // ZERO wall-clock time elapsed -- setTimeout callbacks run on the
+  // macrotask queue, never inside a microtask flush, so there is no window
+  // in which it could fire first, even at ttl:1. `task.ttl` itself is left
+  // completely untouched by this override, so it still holds whatever the
+  // base class decided the real ttl is -- exactly what the terminal-
+  // transition re-arm logic reads to arm the correct timer, counting from
+  // completion, once the task actually finishes.
+  override async createTask(
+    taskParams: Parameters<InMemoryTaskStore['createTask']>[0],
+    requestId: Parameters<InMemoryTaskStore['createTask']>[1],
+    request: Parameters<InMemoryTaskStore['createTask']>[2],
+    sessionId?: Parameters<InMemoryTaskStore['createTask']>[3],
+  ): Promise<Task> {
+    const task = await super.createTask(taskParams, requestId, request, sessionId);
+    const armed = cleanupTimerFor(this, task.taskId);
+    if (armed) {
+      clearTimeout(armed);
+      (this as unknown as { cleanupTimers: Map<string, NodeJS.Timeout> }).cleanupTimers.delete(task.taskId);
+    }
+    return task;
+  }
+
   override async updateTaskStatus(
     taskId: string, status: Parameters<InMemoryTaskStore['updateTaskStatus']>[1],
     statusMessage?: string, sessionId?: string,
