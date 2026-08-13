@@ -86,8 +86,10 @@ const ANALYZE_DESCRIPTION =
   + 'be told apart from a video that simply has no speech. Called as a background task, '
   + 'this returns a handle immediately; progress arrives as status messages like '
   + '"video 2/3: transcribing" or "queued, 1 ahead" (analyses run through a concurrency '
-  + 'pool, default 4 at once, VIDEO_EXTRACT_MAX_CONCURRENCY to change; each concurrent '
-  + 'analysis needs about 1.1 GB of memory). A queued task can be cancelled; a task '
+  + 'pool, default 4 at once, VIDEO_EXTRACT_MAX_CONCURRENCY to change; ~1.1 GB peak per '
+  + 'concurrent analysis, so total footprint is about concurrency x 1.1 GB -- plan for '
+  + '~4.5 GB at the default cap of 4, and VIDEO_EXTRACT_MAX_CONCURRENCY=1 restores the '
+  + 'old flat under-2GB behavior). A queued task can be cancelled; a task '
   + 'whose work has already started cannot -- it will refuse, finish, and deliver its '
   + 'result. ' + LIFETIME + " Each item's result also carries videoPath, the local file it "
   + 'worked from, which you can pass straight back in to inspect another moment without '
