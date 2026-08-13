@@ -477,17 +477,20 @@ describe('resolve_video is exempt from the analyze pool (spec §6)', () => {
   it('a metadata-only resolve completes while the cap-1 pool is fully occupied', async () => {
     // A cap-1 pool whose slot we hold well past resolve_video's own
     // plain-call floor: EVERY plain call against a taskSupport:'optional'
-    // tool now takes at least ~1 pollInterval (default 1000ms) end to end,
-    // because the server's automatic task-polling wrapper
-    // (handleAutomaticTaskPolling in server/mcp.js -- see task-1-report.md)
-    // sleeps a full pollInterval before its first status check, regardless
-    // of how fast the underlying work actually finishes. HOLD_PAD_MS pads
-    // the REAL analyze work (which may itself finish in well under a
-    // second on a tiny local video with frames:'even', which loads no
-    // vision model) by a further 2500ms after it settles, so the pool slot
-    // stays occupied for a duration that cannot plausibly race
-    // resolve_video's own ~1-1.2s floor, independent of real
-    // pipeline/model-load speed on whatever machine runs this.
+    // tool takes at least ~1 pollInterval end to end, because the server's
+    // automatic task-polling wrapper (handleAutomaticTaskPolling in
+    // server/mcp.js -- see task-1-report.md) sleeps a full pollInterval
+    // before its first status check, regardless of how fast the underlying
+    // work actually finishes. Final whole-branch review, Important finding
+    // 2: src/mcp.ts's own createTask calls now pass pollInterval: 150
+    // (down from the store's 1000ms default), so that floor is ~150ms, not
+    // ~1000ms, as of this branch -- HOLD_PAD_MS pads the REAL analyze work
+    // (which may itself finish in well under a second on a tiny local
+    // video with frames:'even', which loads no vision model) by a further
+    // 2500ms after it settles, so the pool slot stays occupied for a
+    // duration that cannot plausibly race resolve_video's own ~150-300ms
+    // floor, independent of real pipeline/model-load speed on whatever
+    // machine runs this.
     const HOLD_PAD_MS = 2500;
     const inner = createSlotPool(1);
     const pool: SlotPool = {

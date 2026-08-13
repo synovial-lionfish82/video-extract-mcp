@@ -313,7 +313,20 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
     },
     {
       createTask: async (args, extra) => {
-        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
+        // Final whole-branch review, Important finding 2: the SDK's
+        // automatic task-polling bridge (handleAutomaticTaskPolling,
+        // server/mcp.js) sleeps a full pollInterval BEFORE its first status
+        // check, no matter how fast the work actually finishes -- so every
+        // plain call against a task-registered tool carries that floor.
+        // createTask's own default (in-memory.js: `pollInterval:
+        // taskParams.pollInterval ?? 1000`) made that floor ~1000ms for
+        // every plain call this server ever served (reviewer probe:
+        // scratch/probe1-latency.ts -- ~1004ms vs 0-2ms on a 0.1.x-shaped
+        // server for identical work). Passing pollInterval here plumbs
+        // straight through to that same default, cutting the floor to
+        // ~150ms -- still nonzero (honestly documented in README.md's
+        // Background tasks section), but no longer close to a full second.
+        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv(), pollInterval: 150 });
         void (async () => {
           try {
             const r = await runAnalyzeExecution(
@@ -399,7 +412,10 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
       // cancel attempt on a live resolve task refuse: there is no
       // meaningful "queued, not yet started" window to distinguish it from.
       createTask: async (args, extra) => {
-        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
+        // Important finding 2 (see analyze_video's own createTask above for
+        // the full rationale): same pollInterval, same ~1000ms -> ~150ms
+        // plain-call floor reduction.
+        const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv(), pollInterval: 150 });
         void (async () => {
           // First statement, before any await -- the client cannot even
           // learn this taskId (createTask's own handler hasn't returned
