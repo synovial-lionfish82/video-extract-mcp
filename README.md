@@ -10,7 +10,7 @@ Built for AI agents. Two MCP tools, no cloud, no API keys, no Python.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A526-brightgreen.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-456%20passing-success.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-492%20passing-success.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-server-orange.svg)](https://modelcontextprotocol.io)
 
 ---
@@ -24,7 +24,7 @@ An LLM cannot watch a video. The usual workaround — dump every Nth frame into 
 - **Transcript, honestly sourced.** The platform's own captions are used whenever the video has any — human-written first, otherwise the platform's automatic ones. Audio is transcribed locally (Whisper or SenseVoice) only for videos with no captions at all. The result tells you which you got, via `transcript.source`.
 - **Keyframes chosen, not sampled.** Scene-boundary detection, blur/quality filtering, on-screen-text novelty (subtitle-aware, so burned-in captions don't preserve redundant frames), and image-embedding similarity feed an iterative diversity-aware selector.
 - **Output goes to disk, not into your context.** The tool reply is a compact summary plus file paths. A 35-frame manifest and a full transcript don't belong in a conversation where the agent needs three numbers from them.
-- **Everything runs on your machine.** No third-party API, no upload, no key.
+- **Everything runs on your machine.** No third-party API, no upload, no key. Long analyses can run as MCP background tasks — the tool returns a handle immediately and pushes progress; see Background tasks below.
 
 ## Quick start
 
@@ -82,6 +82,8 @@ npm run preflight            # verifies ffmpeg / ffprobe / yt-dlp / tesseract
 |---|---|
 | `VIDEO_EXTRACT_MODELS_DIR` | Where speech models live. Defaults to `./models` when that exists, else `~/.cache/video-extract-mcp/models`. |
 | `VIDEO_EXTRACT_WECHAT_COOKIE` | A yuanbao session cookie, required only for WeChat Channels links. |
+| `VIDEO_EXTRACT_MAX_CONCURRENCY` | Caps concurrent `analyze_video` item executions — plain calls and background tasks, batch items and separate calls, all count against the same limit. Default `4`. `resolve_video` is exempt: it loads no models, so there is nothing to throttle. |
+| `VIDEO_EXTRACT_TASK_TTL_MS` | How long a completed background-task handle stays queryable before it expires. Default `1800000` (30 minutes). Governs the in-memory handle only — files already written to `destinationPath` are never deleted by the tool, expired handle or not. |
 
 ## Three ways to use it
 
@@ -132,13 +134,39 @@ The surface is deliberately small. Earlier versions had four tools and the descr
 
 ```ts
 resolve_video({
-  url:             string,   // required
-  destinationPath: string,   // required — where metadata (and media) are written
-  returnVideo?:    boolean,  // default false: metadata only, no download
-  start?:          number,   // seconds; only with returnVideo: true
-  end?:            number,
-  comments?:       boolean,  // default false — slow on popular videos
+  destinationPath: string,          // required — shared by every item below
+  videos: [{                        // one entry per video, at least one
+    url:             string,        // required
+    returnVideo?:    boolean,       // default false: metadata only, no download
+    start?:          number,        // seconds; only with returnVideo: true
+    end?:            number,
+    comments?:       boolean,       // default false — slow on popular videos
+  }],
 })
+```
+
+One video — the common case, written flat into `destinationPath`:
+
+```ts
+resolve_video({
+  destinationPath: "./out",
+  videos: [{ url: "https://youtube.com/watch?v=..." }],
+})
+// -> ./out/metadata.json
+```
+
+Several videos in one call — each gets its own subdirectory, `video-1/`, `video-2/`, ... in array order:
+
+```ts
+resolve_video({
+  destinationPath: "./out",
+  videos: [
+    { url: "https://youtube.com/watch?v=..." },
+    { url: "https://tiktok.com/@user/video/...", returnVideo: true },
+  ],
+})
+// -> ./out/video-1/metadata.json
+// -> ./out/video-2/metadata.json + source.mp4 (returnVideo: true)
 ```
 
 By default it downloads **nothing heavy**. You get title, creator, duration, the chapter list when the platform publishes one, and a short description preview. That is usually enough to decide what to do next — and it composes with ranges into the workflow that makes this whole thing efficient:
@@ -149,15 +177,41 @@ By default it downloads **nothing heavy**. You get title, creator, duration, the
 
 ```ts
 analyze_video({
-  pathOrUrl:       string,                     // URL *or* a local file — both work
-  destinationPath: string,                     // required
-  start?:          number,                     // seconds
-  end?:            number,                     // end === start means one instant
-  frames?:         "key" | "even" | "none",    // default "key"
-  maxFrames?:      number,                     // default 35
-  transcript?:     boolean,                    // default true
-  language?:       string,                     // optional override, e.g. "zh"
+  destinationPath: string,                      // required — shared by every item below
+  videos: [{                                     // one entry per video, at least one
+    pathOrUrl:       string,                     // URL *or* a local file — both work
+    start?:          number,                     // seconds
+    end?:            number,                     // end === start means one instant
+    frames?:         "key" | "even" | "none",    // default "key"
+    maxFrames?:      number,                     // default 35
+    transcript?:     boolean,                    // default true
+    language?:       string,                     // optional override, e.g. "zh"
+  }],
 })
+```
+
+One video — the common case, written flat into `destinationPath`, byte-identical to a 0.1.x call:
+
+```ts
+analyze_video({
+  destinationPath: "./out",
+  videos: [{ pathOrUrl: "https://youtube.com/watch?v=..." }],
+})
+// -> ./out/manifest.json, ./out/transcript.json, frame images
+```
+
+Several videos in one call — each gets its own subdirectory, `video-1/`, `video-2/`, ... in array order, and one item failing never fails the others:
+
+```ts
+analyze_video({
+  destinationPath: "./out",
+  videos: [
+    { pathOrUrl: "https://youtube.com/watch?v=...", maxFrames: 10 },
+    { pathOrUrl: "./local-clip.mp4", frames: "none" },
+  ],
+})
+// -> ./out/video-1/manifest.json, transcript.json, frame images
+// -> ./out/video-2/manifest.json, transcript.json, no frame images (frames: "none")
 ```
 
 - `"key"` runs the importance selector and returns the best frames, deduplicated.
@@ -166,6 +220,15 @@ analyze_video({
 - One exact frame: `start: 7, end: 7, frames: "even", maxFrames: 1, transcript: false`.
 
 Frame selection is bounded to `start`–`end` in both modes, and the transcript covers only the selected range.
+
+## Background tasks
+
+Both tools are task-capable. Called as a plain MCP tool call, nothing changes — every example above behaves exactly as shown, on every client, whether or not it knows what a task is. Called as a **task** — an MCP client marks the call that way, using the (experimental) MCP tasks capability — the tool returns a handle immediately instead of blocking, and pushes progress while the work runs. This matters most for `analyze_video`, where a real video can take minutes.
+
+- **Status messages** describe where the batch is: `"video 2/3: transcribing"` for an item currently running, `"queued, 1 ahead"` for an item waiting on a concurrency slot. Status is visible through client polling (roughly once a second), so it is a snapshot at each poll, not a live per-stage feed — a stage that starts and finishes between two polls can be coalesced away.
+- **Cancellation is honest, not performative — and it is per task, not per item.** A task none of whose items has started executing cancels fully: nothing runs, nothing is written. The moment any item's execution begins, the whole task refuses cancellation — identically for both tools — with a message saying it will finish and deliver its result rather than silently disappearing; a five-video batch with one item already running refuses even while four are still queued. `resolve_video` never queues at all, so a cancel on a live `resolve_video` task always hits that refused case.
+- **Handles are in-memory only.** They expire `VIDEO_EXTRACT_TASK_TTL_MS` after the task completes (default 30 minutes) and die with the server process regardless. Files already written to `destinationPath` are unaffected either way — the tool never deletes them, expired handle or not.
+- **Plain calls need nothing extra.** Task support requires an MCP client that implements the experimental tasks capability; without one, both tools behave exactly as documented above, synchronously.
 
 ## What "important frame" actually means
 
@@ -188,7 +251,7 @@ WeChat Channels (视频号) support is worth calling out: it resolves **headless
 
 ## Design constraints worth knowing
 
-**Peak RAM stays under 2 GB.** Speech recognition and vision embedding are both heavy models, so they never coexist: each runs in its own worker process that exits before the next starts. Measured peak is ~1.1 GB.
+**Memory is a per-concurrency rate, not a flat ceiling.** Speech recognition and vision embedding are both heavy models, so within one analysis they never coexist: each runs in its own worker process that exits before the next starts. ~1.1 GB peak per concurrent analysis; total footprint ≈ concurrency × 1.1 GB. Default cap 4 ⇒ plan for ~4.5 GB worst case. `VIDEO_EXTRACT_MAX_CONCURRENCY=1` restores the old flat under-2GB behavior.
 
 **Single Node runtime.** No Python sidecar, no subprocess to a second language runtime. Speech recognition is `sherpa-onnx-node`; vision embeddings are `@huggingface/transformers`.
 
@@ -204,10 +267,10 @@ WeChat Channels (视频号) support is worth calling out: it resolves **headless
 
 What is verified:
 
-- 440 automated tests pass, including integration tests driving a real MCP client end-to-end against synthetic video fixtures.
+- 492 automated tests pass, including integration tests driving a real MCP client end-to-end against synthetic video fixtures.
 - The WeChat resolution protocol was verified live, end to end, returning a real MP4.
 - Caption-tier selection was verified against the installed yt-dlp's own source.
-- Memory ceiling and single-frame latency are measured numbers, not estimates.
+- The memory rate and single-frame latency are measured numbers, not estimates.
 
 What is **not** verified:
 
@@ -228,7 +291,7 @@ House rules, briefly:
 - Tests are expected to *fail against broken code*. This project's most common review finding has been a test that passes either way — if you add a test, mutate the thing it guards and confirm it goes red.
 - No Python. Single Node runtime.
 - `src/types.ts` is the single source of truth for shared types.
-- Keep the peak-RAM ceiling intact: heavy stages run sequentially, never concurrently.
+- Keep the per-analysis staging invariant intact: within one video's pipeline, heavy stages (speech recognition, vision embedding) run sequentially, never concurrently — that discipline is what keeps the per-concurrent-analysis rate at ~1.1 GB. Across different videos, up to `VIDEO_EXTRACT_MAX_CONCURRENCY` analyses run at once by design.
 
 ```bash
 npm test          # full suite

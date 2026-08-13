@@ -36,8 +36,10 @@ Four layers. Read them in this order; each one's responsibility is genuinely
 distinct and the boundaries are load-bearing.
 
 ```
-src/mcp.ts                  MCP surface: zod schemas + tool descriptions.
-                            Handlers are ~3 lines. NO logic lives here.
+src/mcp.ts                  MCP surface: zod schemas + tool descriptions,
+                            plus task/concurrency/cancellation plumbing
+                            (slot pool, HonestCancelStore) -- orchestration.
+                            The analysis logic itself still lives below.
 src/agent/*Tool.ts          Agent layer: writes manifest/transcript/frames to
                             destinationPath, decides inline-vs-disk, never throws.
 src/analyze.ts              Pipeline orchestrator: resolve -> trim -> normalize
@@ -57,10 +59,42 @@ a defect, not a doc nit.
 
 ## Invariants that break quietly if violated
 
-**Staged memory, under 2 GB peak.** Speech recognition and vision embedding are
-heavy models and must never be resident together. Each runs in its own worker
-process (`transcript/asrWorker.ts`, `vision/embedWorker.ts`) that exits before the
-next stage starts. Anything that lets two heavy stages overlap is a serious defect.
+**Staged memory is a per-concurrent-analysis rate, not a flat ceiling.** Within one
+analysis, speech recognition and vision embedding are still heavy models that must
+never be resident together — each runs in its own worker process
+(`transcript/asrWorker.ts`, `vision/embedWorker.ts`) that exits before the next
+stage starts. Anything that lets two heavy stages overlap *within an item* is a
+serious defect. Across items, `VIDEO_EXTRACT_MAX_CONCURRENCY` (default 4) caps how
+many `analyze_video` item executions run at once — plain calls and tasks, batch
+items and separate calls, identically; `resolve_video` is exempt. ~1.1 GB peak per
+concurrent analysis; total footprint ≈ concurrency × 1.1 GB. Default cap 4 ⇒ plan
+for ~4.5 GB worst case. `VIDEO_EXTRACT_MAX_CONCURRENCY=1` restores the old flat
+under-2GB behavior.
+
+**Batch layout: flat at N=1, `video-N/` at N>1.** A one-item `videos` array writes
+exactly where 0.1.x did, byte-identical. Two or more items each get their own
+`destinationPath/video-1/`, `video-2/`, ... (1-based, array order), so per-item
+`manifest.json`/`metadata.json` never collide. `itemDir` (`src/agent/analyzeTool.ts`)
+is the one place this decision lives — do not reimplement the branch elsewhere.
+
+**The MCP SDK is pinned to exactly `1.30.0`, not a caret range.** The tasks API this
+project depends on lives under the SDK's own `experimental/` namespace, whose own
+docs say it may change without notice — an unpinned upgrade could silently change
+task or cancellation behavior underneath every test in this file. Treat an SDK bump
+as a deliberate, tested event: update the pin, then run `tests/taskSpike.test.ts`
+first, before touching anything else — it is the tripwire that pins the exact API
+facts (`task-1-report.md`) the rest of the task/batching design depends on.
+
+**Cancellation is honest, never pretend.** A task none of whose items has started
+executing cancels fully. The moment any item's execution begins, the whole task
+refuses cancellation — identically for both tools — with a message saying it will
+finish and deliver its result; this is per-task, not per-item, so a batch with one
+item already running still refuses even while the rest are queued. `resolve_video`
+never queues (it bypasses the analyze pool entirely), so every cancel on a live
+`resolve_video` task hits this refusal — it has no cancellable window at all.
+`HonestCancelStore` (`src/mcp.ts`) enforces this. Do not "fix" a refusal into a
+pretend-cancel that reports `cancelled` while the work quietly finishes underneath —
+that is exactly the dishonesty class this project exists to kill.
 
 **Workers are resolved as siblings of the *running* module**, so they only exist in
 compiled output — from `src/` under tsx the sibling is a `.ts` file and the spawn
@@ -120,8 +154,10 @@ deferred item with its reasoning — check it before "discovering" a known gap.
 
 ## Reference
 
-- `docs/superpowers/specs/` — design docs; the v2 spec governs the current agent surface
+- `docs/superpowers/specs/` — design docs; the v2 spec governs the agent surface,
+  the tasks-and-batching spec (2026-08-12) governs tasks/batching on top of it
 - `docs/follow-ups.md` — deferred work, with the reasoning that deferred it
-- Env: `VIDEO_EXTRACT_MODELS_DIR`, `VIDEO_EXTRACT_WECHAT_COOKIE`
+- Env: `VIDEO_EXTRACT_MODELS_DIR`, `VIDEO_EXTRACT_WECHAT_COOKIE`,
+  `VIDEO_EXTRACT_MAX_CONCURRENCY`, `VIDEO_EXTRACT_TASK_TTL_MS`
 - WeChat resolution was **clean-room derived**; the well-known reference
   implementation is MIT + Commons Clause. Never consult it when extending that code.
