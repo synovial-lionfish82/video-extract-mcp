@@ -129,10 +129,13 @@ describe('task lifecycle (spec §7-§9)', () => {
   it('statusMessage carries batch position and stage; a bad item does not fail the task (§5/§8)', async () => {
     // N=2 batch as a task on a cap-1 pool, item 2 unresolvable. The pad
     // holds item 1's LAST real status ("video 1/2: frames") for padMs after
-    // its fast local-source work genuinely finishes -- a window several
-    // times longer than the client's own ~1000ms poll gap, so at least one
-    // poll is guaranteed (by construction, not timing luck: setTimeout
-    // never fires early) to land while that label is current.
+    // its fast local-source work genuinely finishes -- 1.5x the client's
+    // own ~1000ms poll gap, which is enough: the very next scheduled poll
+    // (at most ~1000ms after the previous one) must land inside a window
+    // that outlasts it, so at least one poll is guaranteed (by
+    // construction, not timing luck: setTimeout never fires early, and the
+    // pigeonhole guarantee holds at 1.5x same as it would at 10x) to land
+    // while that label is current.
     const pool = paddedCap1Pool(1500);
     const server = buildServer({ analyzeSlots: pool });
     const client = await connectClient(server);

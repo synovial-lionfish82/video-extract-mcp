@@ -220,8 +220,14 @@ export interface AnalyzeRunHooks {
   run?: <T>(fn: () => Promise<T>, onQueued: (ahead: number) => void) => Promise<T>;
   onStage?: (itemIndex: number, stage: AnalyzeStage) => void;
   onQueued?: (itemIndex: number, ahead: number) => void;
-  /** Fires when the item actually starts executing (post-queue). Task 6 uses
-   *  it to mark the task running for honest-cancellation purposes. */
+  /** Fires when the item actually starts executing (post-queue, inside the
+   *  `run` wrapper's own fn). Available for any caller that wants this
+   *  signal; src/mcp.ts's own honest-cancellation marking no longer goes
+   *  through this hook specifically -- it now calls its equivalent callback
+   *  directly at the top of its `run` wrapper, before that wrapper's own
+   *  cancellation check, which this hook (firing only once `fn` itself
+   *  runs) would reach too late to do the same job. See src/mcp.ts's
+   *  runAnalyzeExecution for the full rationale. */
   onItemStart?: (itemIndex: number) => void;
 }
 

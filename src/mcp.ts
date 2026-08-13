@@ -119,15 +119,28 @@ const RESOLVE_DESCRIPTION =
   + 'written to the metadata file, never returned inline.';
 
 // Task 6: honest cancellation (spec §8/§13, task-1-report.md's fact (c)).
-// Queued-cancel is enforced here -- immediately before an item's real work
-// begins, inside the pool-wrapped fn -- because that is the one place
-// execution can still be intercepted before onItemStart marks the task
+// Queued-cancel is enforced here -- inside the pool-wrapped fn, which only
+// ever runs once a slot is actually granted (never while genuinely queued
+// in the pool's own waiters list -- see slots.ts) -- because that is the
+// one place execution can still be intercepted before the task becomes
 // non-cancellable (see HonestCancelStore below). checkCancelled consults
 // the task's OWN status through the same extra.taskStore wrapper the rest
-// of the handler uses; a 'cancelled' status can only mean tasks/cancel
-// already succeeded (HonestCancelStore only lets that happen before
-// onItemStart has fired for this task), so throwing here can never race a
-// legitimately-running item.
+// of the handler uses.
+//
+// Ordering fix (post-commit review finding, task-6-report.md "Fix report"
+// section): onItemStart marks store.executing FIRST, synchronously, before
+// checkCancelled's own await -- not after, as originally shipped. The
+// original order (check, then mark once fn() itself ran) left a genuine
+// TOCTOU window: a cancel landing between the check resolving false and the
+// mark actually happening would be ACCEPTED (executing not yet set) even
+// though the item was already committed to running to completion moments
+// later -- probed deterministically (60/60) once that interleaving is
+// engineered, though naturally occurring under normal timing in 0/40 trials.
+// Marking first closes it: once a slot is granted, the task is committed to
+// running (barring a cancellation already recorded from its genuinely-queued
+// window, which checkCancelled below still detects), so refusing cancellation
+// from that instant on is the honest choice even before the item's real work
+// has literally started.
 class TaskCancelledError extends Error {
   constructor() { super('task was cancelled before this item started'); this.name = 'TaskCancelledError'; }
 }
@@ -160,12 +173,20 @@ function runAnalyzeExecution(
   const n = args.videos.length;
   return analyzeVideoTool(args, {
     run: (fn, onQueued) => pool.run(async () => {
+      // Mark FIRST, before the checkCancelled await -- see the ordering-fix
+      // comment above this function. onItemStart's itemIndex argument is
+      // unused by its only real caller (store.executing.add(task.taskId)
+      // ignores which item started), so an index-less call is safe; it is
+      // invoked directly here rather than threaded through
+      // analyzeVideoTool's own onItemStart hook (which would fire only
+      // after checkCancelled and fn() itself ran -- too late to close the
+      // race this exists to close).
+      onItemStart?.(-1);
       if (await checkCancelled?.()) throw new TaskCancelledError();
       return fn();
     }, onQueued),
     onStage: (i, s) => onUpdate?.(label(i, n, s)),
     onQueued: (i, ahead) => onUpdate?.(label(i, n, `queued, ${ahead} ahead`)),
-    onItemStart,
   });
 }
 
@@ -240,15 +261,22 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
             try {
               await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
             } catch {
-              // Task 1's fact (c)-4: a cancel can race a just-finished
-              // executor in the narrow gap between the queued-cancel check
-              // passing and onItemStart actually marking the task
-              // executing -- the store's own terminal-state guard then
-              // refuses this write. That is a successful cancellation
-              // completing honestly, not wrapper breakage: swallow it here
+              // Post-ordering-fix (see the comment above runAnalyzeExecution),
+              // a genuine cancellation race is closed here: onItemStart marks
+              // store.executing BEFORE checkCancelled ever runs, so once any
+              // item's slot is granted, every cancel attempt refuses through
+              // to completion -- there is no remaining window where a
+              // legitimately-running item's eventual 'completed' write loses
+              // to a cancel that landed after it was already committed to
+              // running. What CAN still make this write fail is unrelated to
+              // cancellation: TTL expiry deletes the task row outright (a
+              // distinct "task not found" throw, not a terminal-status
+              // conflict) if the configured ttl is short enough to fire
+              // before this line runs (task-6-report.md's TTL test deals
+              // with exactly this). Either way the store's own state is
+              // already authoritative by the time we get here -- swallow
               // rather than falling into the 'failed' branch below, which
-              // would also be refused by the same guard and would
-              // misreport an honestly-cancelled task as failed instead.
+              // would also be refused/pointless for the same reason.
             }
           } catch (e) {
             // Queued-cancel: the pre-item check above threw because the
@@ -290,29 +318,53 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
     {
       // Spec §6: resolve_video loads no models -- it is network and ffmpeg
       // -- so, unlike analyze_video, it never goes near the slot pool.
-      // Task 6 scope note: this handler never adds its taskId to
-      // store.executing, so HonestCancelStore never refuses a cancel here --
-      // a resolve_video task remains cancellable (store-status-only, per
-      // fact (c)-4: nothing stops the in-flight download itself) for its
-      // entire run, identical to Task 5's pre-Task-6 behavior. RESOLVE_
-      // DESCRIPTION makes no cancellation claim, so nothing here is
-      // dishonest, but it does mean a mid-download cancel can still report
-      // 'cancelled' while the download quietly finishes -- flagged in
-      // task-6-report.md as a follow-up candidate, not fixed here since the
-      // brief's mandate (and every Step-1 test) scopes honest cancellation
-      // to analyze_video's pool-driven executor.
+      //
+      // Task 6 CRITICAL fix (post-commit review finding, task-6-report.md
+      // "Fix report" section, spec §8): this handler now marks
+      // store.executing for its entire run. Originally it never did, on the
+      // reasoning that honest cancellation was analyze_video's mandate
+      // alone -- proven wrong live (network leaf mocked with a delay):
+      // cancelTask() on a running resolve task was ACCEPTED while the
+      // download kept running, and getTask reported 'cancelled' forever
+      // while the work quietly finished underneath -- exactly the
+      // dishonesty class spec §8 names, and spec §8 carries no tool
+      // qualifier. resolve_video never queues (unlike analyze_video, it has
+      // no pool phase to intercept a cancel against at all -- spec §7 still
+      // requires it to "report working until done"), so marking it
+      // executing immediately, before its only await, is what makes EVERY
+      // cancel attempt on a live resolve task refuse: there is no
+      // meaningful "queued, not yet started" window to distinguish it from.
       createTask: async (args, extra) => {
         const task = await extra.taskStore.createTask({ ttl: taskTtlMsFromEnv() });
         void (async () => {
+          // First statement, before any await -- the client cannot even
+          // learn this taskId (createTask's own handler hasn't returned
+          // yet) until after this line runs, so unlike analyze_video's
+          // queued-then-granted items, there is no window at all in which a
+          // cancel could land before this mark takes effect.
+          store.executing.add(task.taskId);
           try {
             const r = await resolveVideoTool(args as ResolveToolArgs);
-            await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+            try {
+              await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
+            } catch {
+              // Defensive, mirroring analyze_video's own guard (see its
+              // createTask handler above): a refused write here means the
+              // store was already terminal by the time this ran -- TTL
+              // expiry deleting the task row outright is the one
+              // remaining, genuine way that can happen (a distinct "task
+              // not found" throw), since the marking above closes off any
+              // cancellation-race window for resolve_video specifically.
+              // Swallow rather than misreport via the 'failed' branch below.
+            }
           } catch (e) {
             // Spec §8: task-failed is reserved for the wrapper itself breaking.
             await extra.taskStore.storeTaskResult(task.taskId, 'failed', {
               content: [{ type: 'text', text: `task execution failed: ${e instanceof Error ? e.message : String(e)}` }],
               isError: true,
             }).catch(() => {});
+          } finally {
+            store.executing.delete(task.taskId);
           }
         })();
         return { task };
