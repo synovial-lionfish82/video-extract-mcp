@@ -71,6 +71,11 @@ concurrent analysis; total footprint ≈ concurrency × 1.1 GB. Default cap 4 �
 for ~4.5 GB worst case. `VIDEO_EXTRACT_MAX_CONCURRENCY=1` restores the old flat
 under-2GB behavior.
 
+**0.2.0 is a breaking change to both tools' call shape** (README.md has the full
+note): 0.1.x's top-level `url`/`pathOrUrl` became a required `videos` array, one
+entry per video. The on-disk layout at `videos.length === 1` is unaffected — see
+below — but the JSON reply shape changed for every call, even N=1.
+
 **Batch layout: flat at N=1, `video-N/` at N>1.** A one-item `videos` array writes
 exactly where 0.1.x did, byte-identical. Two or more items each get their own
 `destinationPath/video-1/`, `video-2/`, ... (1-based, array order), so per-item

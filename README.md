@@ -83,7 +83,7 @@ npm run preflight            # verifies ffmpeg / ffprobe / yt-dlp / tesseract
 | `VIDEO_EXTRACT_MODELS_DIR` | Where speech models live. Defaults to `./models` when that exists, else `~/.cache/video-extract-mcp/models`. |
 | `VIDEO_EXTRACT_WECHAT_COOKIE` | A yuanbao session cookie, required only for WeChat Channels links. |
 | `VIDEO_EXTRACT_MAX_CONCURRENCY` | Caps concurrent `analyze_video` item executions — plain calls and background tasks, batch items and separate calls, all count against the same limit. Default `4`. `resolve_video` is exempt: it loads no models, so there is nothing to throttle. |
-| `VIDEO_EXTRACT_TASK_TTL_MS` | How long a completed background-task handle stays queryable before it expires. Default `1800000` (30 minutes). Governs the in-memory handle only — files already written to `destinationPath` are never deleted by the tool, expired handle or not. |
+| `VIDEO_EXTRACT_TASK_TTL_MS` | How long a completed background-task handle stays queryable before it expires. Default `1800000` (30 minutes). `0` (or any non-positive value) means the handle never expires. Governs the in-memory handle only — files already written to `destinationPath` are never deleted by the tool, expired handle or not. |
 
 ## Three ways to use it
 
@@ -127,6 +127,20 @@ console.log(manifest.frames.map((f) => f.image));
 Note that both the CLI and library paths run the **compiled** output. The speech and vision models run in separate worker processes resolved next to the compiled module, so running the TypeScript sources directly leaves those workers unresolvable — they degrade to a warning rather than an error, which is quiet enough to miss. `npm run cli` builds first for this reason.
 
 ## The two tools
+
+> **Breaking change in 0.2.0:** both tools' call shape changed. 0.1.x took a
+> single top-level `url` (`resolve_video`) or `pathOrUrl` (`analyze_video`)
+> per call. 0.2.0 replaces that with a `videos` array — one entry per video,
+> so a single call can now process a batch — plus the required
+> `destinationPath` that used to sit alongside it. A 0.1.x call needs its
+> arguments reshaped: `{ url: "..." }` becomes `{ destinationPath: "...",
+> videos: [{ url: "..." }] }` (`resolve_video`), same idea for
+> `analyze_video`'s `pathOrUrl`. The **on-disk output layout is unaffected**
+> at `videos.length === 1` — a single-item call still writes exactly where
+> 0.1.x did, byte-for-byte (`manifest.json` etc. flat in `destinationPath`,
+> no `video-1/` subdirectory) — but the **JSON reply shape** changed too:
+> every reply is now `{ videos: [...] }`, one entry per item, even for a
+> single video. See the current schemas just below for the exact shape.
 
 The surface is deliberately small. Earlier versions had four tools and the descriptions had to shout about which ones took URLs versus local paths — a sign the design was wrong, not that the warning needed to be louder.
 
