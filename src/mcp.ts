@@ -381,7 +381,28 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
               args as AnalyzeToolArgs, pool,
               (m) => void extra.taskStore.updateTaskStatus(task.taskId, 'working', m).catch(() => {}),
               () => { store.executing.add(task.taskId); },
-              async () => (await extra.taskStore.getTask(task.taskId))?.status === 'cancelled',
+              async () => {
+                const cancelled = (await extra.taskStore.getTask(task.taskId))?.status === 'cancelled';
+                // Final whole-branch review, Minor finding 8: analyzeVideoTool
+                // fires every item's pool.run() concurrently (Promise.all),
+                // so on a queued-cancel of a batch with N>=3 items still
+                // queued, whichever item's checkCancelled sees 'cancelled'
+                // FIRST is not necessarily the LAST one to run through this
+                // seam -- the outer finally below (which deletes taskId from
+                // store.executing exactly once, when the whole
+                // runAnalyzeExecution promise settles) can already have run
+                // while later items are still queued behind it in the pool,
+                // each independently re-adding taskId via onItemStart the
+                // moment its own slot is eventually granted -- a leak with
+                // nothing left to ever clean it up again. Deleting right
+                // here, on every detection, closes that: safe because a
+                // cancelled task can never have a running item past this
+                // checkpoint (every item's run wrapper checks cancellation
+                // before calling its real fn()), so this can never delete out
+                // from under genuinely running work.
+                if (cancelled) store.executing.delete(task.taskId);
+                return cancelled;
+              },
             );
             try {
               await extra.taskStore.storeTaskResult(task.taskId, 'completed', toResult(r));
@@ -430,7 +451,7 @@ export function buildServer(opts?: { analyzeSlots?: SlotPool }): McpServer {
       title: 'Resolve video (metadata, optionally the file)',
       description: RESOLVE_DESCRIPTION,
       inputSchema: {
-        destinationPath: z.string().describe('Directory to write metadata (and the video, if requested) into. Created if missing.'),
+        destinationPath: z.string().describe('Directory to write metadata (and the video, if requested) into. Created if missing. Re-running the same call overwrites in place.'),
         videos: z.array(resolveItemSchema).min(1).describe('One entry per video to resolve. One item = single video, flat layout; several = video-N subdirectories.'),
       },
       // Fix 4(c): both tools write to the user's filesystem -- metadata,
