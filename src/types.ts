@@ -159,7 +159,11 @@ export interface Manifest {
 }
 
 
-/** Progress seams analyzeVideo reports through AnalyzeOptions.onStage (spec §7). */
+/** Progress seams analyzeVideo reports through AnalyzeOptions.onStage (spec §7).
+ *  A stage firing means that work is STARTING, not that it already
+ *  succeeded -- each call is the first statement of its stage, before
+ *  anything in it has actually run, so a caller sees it even when that
+ *  stage goes on to fail. */
 export type AnalyzeStage = 'resolving' | 'transcribing' | 'frames';
 
 export interface AnalyzeOptions {
@@ -170,7 +174,9 @@ export interface AnalyzeOptions {
   preferredLanguage?: string;
   destinationPath?: string;
   outDir?: string;
-  /** Called at pipeline seams; only for stages that actually run. Failures in
-   *  the callback are the caller's own problem -- not caught here. */
+  /** Called at pipeline seams; only for stages that actually run. A call
+   *  means the stage is STARTING -- it does not mean the stage, or the
+   *  overall analysis, went on to succeed. Failures in the callback are
+   *  the caller's own problem -- not caught here. */
   onStage?: (stage: AnalyzeStage) => void;
 }
