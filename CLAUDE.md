@@ -78,12 +78,13 @@ exactly where 0.1.x did, byte-identical. Two or more items each get their own
 is the one place this decision lives — do not reimplement the branch elsewhere.
 
 **The MCP SDK is pinned to exactly `1.30.0`, not a caret range.** The tasks API this
-project depends on lives under the SDK's own `experimental/` namespace, whose own
-docs say it may change without notice — an unpinned upgrade could silently change
-task or cancellation behavior underneath every test in this file. Treat an SDK bump
-as a deliberate, tested event: update the pin, then run `tests/taskSpike.test.ts`
-first, before touching anything else — it is the tripwire that pins the exact API
-facts (`task-1-report.md`) the rest of the task/batching design depends on.
+project depends on lives under the SDK's `experimental/` namespace, which warns it
+may change without notice — an unpinned upgrade could silently change task or
+cancellation behavior underneath every task/cancellation test in the suite. Treat an
+SDK bump as a deliberate, tested event: update the pin, then run
+`tests/taskSpike.test.ts` first, before touching anything else — it is the tripwire
+that pins the exact API facts (`task-1-report.md`) the rest of the task/batching
+design depends on.
 
 **Cancellation is honest, never pretend.** A task none of whose items has started
 executing cancels fully. The moment any item's execution begins, the whole task
