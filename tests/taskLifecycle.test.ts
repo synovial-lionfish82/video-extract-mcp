@@ -129,13 +129,16 @@ describe('task lifecycle (spec §7-§9)', () => {
   it('statusMessage carries batch position and stage; a bad item does not fail the task (§5/§8)', async () => {
     // N=2 batch as a task on a cap-1 pool, item 2 unresolvable. The pad
     // holds item 1's LAST real status ("video 1/2: frames") for padMs after
-    // its fast local-source work genuinely finishes -- 1.5x the client's
-    // own ~1000ms poll gap, which is enough: the very next scheduled poll
-    // (at most ~1000ms after the previous one) must land inside a window
-    // that outlasts it, so at least one poll is guaranteed (by
-    // construction, not timing luck: setTimeout never fires early, and the
-    // pigeonhole guarantee holds at 1.5x same as it would at 10x) to land
-    // while that label is current.
+    // its fast local-source work genuinely finishes -- comfortably more
+    // than the client's own poll gap (final review, Important 2:
+    // src/mcp.ts's createTask calls now pass pollInterval: 150, so the
+    // real gap is ~150ms, not the ~1000ms default -- 1500ms is ~10x that,
+    // not the 1.5x it would have been pre-fix), which is enough: the very
+    // next scheduled poll (at most ~150ms after the previous one) must
+    // land inside a window that outlasts it, so at least one poll is
+    // guaranteed (by construction, not timing luck: setTimeout never fires
+    // early, and the pigeonhole guarantee holds at 10x same as it would at
+    // 1.5x) to land while that label is current.
     const pool = paddedCap1Pool(1500);
     const server = buildServer({ analyzeSlots: pool });
     const client = await connectClient(server);
@@ -225,10 +228,11 @@ describe('task lifecycle (spec §7-§9)', () => {
     expect(outcome.r.statusMessage).toBe('Client cancelled task execution.');
 
     // Drain A to its OWN natural completion first. This necessarily spans
-    // at least one full client poll interval (~1000ms, fact (b)) past A's
-    // real server-side completion, which is itself past the pool's 2000ms
-    // pad -- ample time for the pool to have hand B's slot over and for
-    // B's pre-item cancelled check to run (or, under the
+    // at least one full client poll interval (fact (b); final review,
+    // Important 2: ~150ms as of this branch, not the ~1000ms default) past
+    // A's real server-side completion, which is itself past the pool's
+    // 2000ms pad -- ample time for the pool to have handed B's slot over
+    // and for B's pre-item cancelled check to run (or, under the
     // queued-cancel-executes-anyway mutant, for B's own small/fast item to
     // have actually run and written a manifest).
     for await (const _msg of streamA) { /* drain to completion */ }
@@ -259,8 +263,10 @@ describe('task lifecycle (spec §7-§9)', () => {
     const taskId = (first.value as StreamMsg).task!.taskId;
 
     // Wait for a genuine stage message via direct getTask polling (NOT the
-    // stream's own ~1000ms poll cadence -- this is a separate, much finer
-    // grained loop) -- proof onItemStart has already fired, since it is
+    // stream's own poll cadence -- final review, Important 2: ~150ms as of
+    // this branch, not the ~1000ms default -- this is a separate, still
+    // finer grained 50ms-step loop) -- proof onItemStart has already
+    // fired, since it is
     // unconditionally the first statement of the real per-item fn, strictly
     // before analyzeVideo's own first onStage call. At N=1, label(i,n,msg)
     // is the bare stage string (n===1 short-circuits the "video i/n:"
