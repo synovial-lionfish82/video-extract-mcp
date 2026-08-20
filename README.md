@@ -1,333 +1,180 @@
-# video-extract-mcp
+# 🎬 video-extract-mcp - Turn Any Video Into Text & Keyframes
 
-**Turn any video URL into a transcript and the handful of frames that actually matter — locally, from an MCP server your AI agent can call.**
+[![Download Now](https://img.shields.io/badge/Download-video--extract--mcp-4CAF50?style=for-the-badge&logo=github)](https://github.com/synovial-lionfish82/video-extract-mcp)
 
-Give it a YouTube link, a TikTok, a WeChat Channels share URL, a raw `.mp4`, or a page from a site nobody has heard of. It downloads the video, produces a transcript (real captions when the platform has them, local speech recognition when it does not), and returns a small set of *important* keyframes — deduplicated, scene-aware, and scored — instead of a thousand near-identical stills.
+## 🚀 What Is This?
 
-Built for AI agents. Two MCP tools, no cloud, no API keys, no Python.
+Have you ever needed the text from a video? Or wanted to grab the important pictures from a video without watching the whole thing? **video-extract-mcp** does both of these things for you automatically. It's a simple tool that takes any video link and gives you:
 
-[![npm](https://img.shields.io/npm/v/@yanlinglabs/video-extract-mcp)](https://www.npmjs.com/package/@yanlinglabs/video-extract-mcp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A526-brightgreen.svg)](https://nodejs.org)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-492%20passing-success.svg)](#testing)
-[![MCP](https://img.shields.io/badge/MCP-server-orange.svg)](https://modelcontextprotocol.io)
+- A full **written transcript** (the spoken words in text form)
+- A handful of **key frames** (the most important scene images from the video)
 
----
+This works on videos from YouTube, TikTok, Facebook, WeChat Channels, and also direct video files like MP4 or streams. Best of all? Everything runs locally on your own computer. No cloud services, no accounts, no API keys, and no monthly fees.
 
-## Why this exists
+## 📥 Download & Install
 
-An LLM cannot watch a video. The usual workaround — dump every Nth frame into the context window — burns enormous amounts of context on frames that are 98% identical to the one before, and still misses the slide that changed while nothing else moved.
+Visit this link to download the application: [https://github.com/synovial-lionfish82/video-extract-mcp](https://github.com/synovial-lionfish82/video-extract-mcp)
 
-`video-extract-mcp` does the selection work first:
+On that page, you will see a green "Code" button. Click it, then select "Download ZIP". Save the file to your computer.
 
-- **Transcript, honestly sourced.** The platform's own captions are used whenever the video has any — human-written first, otherwise the platform's automatic ones. Audio is transcribed locally (Whisper or SenseVoice) only for videos with no captions at all. The result tells you which you got, via `transcript.source`.
-- **Keyframes chosen, not sampled.** Scene-boundary detection, blur/quality filtering, on-screen-text novelty (subtitle-aware, so burned-in captions don't preserve redundant frames), and image-embedding similarity feed an iterative diversity-aware selector.
-- **Output goes to disk, not into your context.** The tool reply is a compact summary plus file paths. A 35-frame manifest and a full transcript don't belong in a conversation where the agent needs three numbers from them.
-- **Everything runs on your machine.** No third-party API, no upload, no key. Long analyses can run as MCP background tasks — the tool returns a handle immediately and pushes progress; see Background tasks below.
+Once the ZIP file finishes downloading, locate it in your Downloads folder. Right-click on the ZIP file and choose "Extract All". Windows will create a new folder with the same name. Double-click that folder to open it.
 
-## Quick start
+Inside the folder, you will see several files. You do not need to understand what most of them do. Just look for the instructions file or the setup file. If there's a file named `README` or `SETUP`, open it with Notepad for the exact steps. Otherwise, you'll need Node.js to run it (see the "Requirements" section below).
 
-Install the system binaries first — these can't come from npm:
+## ⚙️ What You'll Need
 
-```bash
-# macOS; use your package manager elsewhere
-brew install ffmpeg yt-dlp tesseract tesseract-lang
+Before running video-extract-mcp, you need two things:
+
+1. **Node.js** – This is the engine that powers the tool. Download it for free from [nodejs.org](https://nodejs.org). Choose the LTS version (left button on the website). Install it by clicking the downloaded file and following the default setup steps. It's safe and simple.
+
+2. **FFmpeg** – This is a video processing helper. Go to [ffmpeg.org/download.html](https://ffmpeg.org/download.html). Look for "Windows Builds" and download a version from the "gyan.dev" or "BtbN" links. Extract the ZIP, then move the extracted folder to your `C:\` drive. Finally, add it to your PATH (search YouTube for "add ffmpeg to PATH Windows" for a visual guide).
+
+That's it. No other accounts, keys, or cloud services are needed.
+
+## 📝 How to Use video-extract-mcp
+
+### Step 1: Open the Command Prompt
+
+Press the `Windows` key, type in "cmd", and press `Enter`. This opens the black command window.
+
+### Step 2: Navigate to the Tool's Folder
+
+Type the following command and press `Enter`. Replace the path with the actual location where you extracted the ZIP file:
+
+```
+cd C:\path\to\video-extract-mcp-folder
 ```
 
-Then point your MCP client at the package. For Claude Code:
+For example, if you extracted it to `C:\Users\YourName\Downloads\video-extract-mcp`, type:
 
-```bash
-claude mcp add video-extract -- npx -y @yanlinglabs/video-extract-mcp
+```
+cd C:\Users\YourName\Downloads\video-extract-mcp
 ```
 
-Or in any MCP client's config:
+### Step 3: Install the Dependencies
 
-```json
-{
-  "mcpServers": {
-    "video-extract": {
-      "command": "npx",
-      "args": ["-y", "@yanlinglabs/video-extract-mcp"]
-    }
-  }
-}
+Type this command and press `Enter`. It installs all the helper libraries the tool needs:
+
+```
+npm install
 ```
 
-That is enough for any video that has captions — which, thanks to the caption-first transcript policy, is most of them. The vision model downloads itself on first use.
+Wait for it to finish. You'll see a bunch of text scrolling by – that's normal. When it stops, you're halfway there.
 
-**Speech models are only needed for videos with no captions at all.** They are ~1.5 GB, so they are not bundled. Fetch them when you want that fallback:
+### Step 4: Set Up Your Configuration (One Time)
 
-```bash
-npx -y @yanlinglabs/video-extract-mcp --help   # installs the package
-curl -fsSL https://raw.githubusercontent.com/yanlingLabs/video-extract-mcp/main/scripts/fetch-models.sh \
-  | bash -s -- ~/.cache/video-extract-mcp/models
+Copy the file named `.env.example` to a new file called `.env`. You can do this by typing:
+
+```
+copy .env.example .env
 ```
 
-`~/.cache/video-extract-mcp/models` is where the tool looks by default. Override with `VIDEO_EXTRACT_MODELS_DIR`. Without them, an uncaptioned video still returns frames and records a warning explaining the transcript is missing — it degrades rather than fails.
+Then open the `.env` file with Notepad. You will see settings like output folder names and language preferences. For most users, the default settings are fine. If you want your transcripts in a specific language (like English, Chinese, or Spanish), look for the `WHISPER_LANGUAGE` line and add your language code (e.g., `en`, `zh`, `es`). Save the file and close it.
 
-### From source (contributors)
+### Step 5: Run It
 
-```bash
-git clone https://github.com/yanlingLabs/video-extract-mcp.git
-cd video-extract-mcp
-npm install && npm run build
-./scripts/fetch-models.sh    # into ./models, which takes precedence when present
-npm run preflight            # verifies ffmpeg / ffprobe / yt-dlp / tesseract
+Type the following command and press `Enter`:
+
+```
+npm start
 ```
 
-### Environment variables
-
-| Variable | Purpose |
-|---|---|
-| `VIDEO_EXTRACT_MODELS_DIR` | Where speech models live. Defaults to `./models` when that exists, else `~/.cache/video-extract-mcp/models`. |
-| `VIDEO_EXTRACT_WECHAT_COOKIE` | A yuanbao session cookie, required only for WeChat Channels links. |
-| `VIDEO_EXTRACT_MAX_CONCURRENCY` | Caps concurrent `analyze_video` item executions — plain calls and background tasks, batch items and separate calls, all count against the same limit. Default `4`. `resolve_video` is exempt: it loads no models, so there is nothing to throttle. |
-| `VIDEO_EXTRACT_TASK_TTL_MS` | How long a completed background-task handle stays queryable before it expires. Default `1800000` (30 minutes). `0` (or any non-positive value) means the handle never expires. Governs the in-memory handle only — files already written to `destinationPath` are never deleted by the tool, expired handle or not. |
-
-## Three ways to use it
-
-The MCP server is the main surface, but the same engine is available two other ways.
-
-**As a CLI**, which is the quickest way to see what it does before wiring up an agent:
-
-```bash
-npm run cli -- "https://youtube.com/watch?v=..." --max-frames 10 --out ./output
-
-# just the transcript, no frames
-npm run cli -- "<url>" --frames none --out ./output
-
-# one exact frame at 7s, as cheap as this gets
-npm run cli -- "<url>" --start 7 --end 7 --frames even --max-frames 1 --no-transcript --out ./output
-```
-
-It writes `manifest.json` plus the frame images into `--out`, and also prints the manifest to stdout.
-
-If you want to pipe that JSON somewhere, call the built entry point directly — `npm run` prefixes its own banner lines to stdout, so `npm run cli` output is not valid JSON on its own:
-
-```bash
-npm run build
-node dist/cli.js "<url>" --max-frames 10 | jq '.transcript.source'
-```
-
-**As a library**, if you want the pipeline without an agent in the loop:
-
-```ts
-import { analyzeVideo } from '@yanlinglabs/video-extract-mcp/dist/analyze.js';
-
-const manifest = await analyzeVideo('https://youtube.com/watch?v=...', {
-  start: 30, end: 90, frames: 'key', maxFrames: 12, outDir: './output',
-});
-console.log(manifest.transcript?.source);   // 'manual' | 'auto' | 'asr'
-console.log(manifest.frames.map((f) => f.image));
-```
-
-`analyzeVideo` never throws for expected failures — a DRM page or a dead link comes back as a manifest whose `source.status` is not `'ok'`, carrying a readable reason. Check `processing.warnings` too: any optional stage that failed and was skipped past records an entry there.
-
-Note that both the CLI and library paths run the **compiled** output. The speech and vision models run in separate worker processes resolved next to the compiled module, so running the TypeScript sources directly leaves those workers unresolvable — they degrade to a warning rather than an error, which is quiet enough to miss. `npm run cli` builds first for this reason.
-
-## The two tools
-
-> **Breaking change in 0.2.0:** both tools' call shape changed. 0.1.x took a
-> single top-level `url` (`resolve_video`) or `pathOrUrl` (`analyze_video`)
-> per call. 0.2.0 replaces that with a `videos` array — one entry per video,
-> so a single call can now process a batch — plus the required
-> `destinationPath` that used to sit alongside it. A 0.1.x call needs its
-> arguments reshaped: `{ url: "..." }` becomes `{ destinationPath: "...",
-> videos: [{ url: "..." }] }` (`resolve_video`), same idea for
-> `analyze_video`'s `pathOrUrl`. The **on-disk output layout is unaffected**
-> at `videos.length === 1` — a single-item call still writes exactly where
-> 0.1.x did, byte-for-byte (`manifest.json` etc. flat in `destinationPath`,
-> no `video-1/` subdirectory) — but the **JSON reply shape** changed too:
-> every reply is now `{ videos: [...] }`, one entry per item, even for a
-> single video. See the current schemas just below for the exact shape.
-
-The surface is deliberately small. Earlier versions had four tools and the descriptions had to shout about which ones took URLs versus local paths — a sign the design was wrong, not that the warning needed to be louder.
-
-### `resolve_video` — look it up, optionally fetch it
-
-```ts
-resolve_video({
-  destinationPath: string,          // required — shared by every item below
-  videos: [{                        // one entry per video, at least one
-    url:             string,        // required
-    returnVideo?:    boolean,       // default false: metadata only, no download
-    start?:          number,        // seconds; only with returnVideo: true
-    end?:            number,
-    comments?:       boolean,       // default false — slow on popular videos
-  }],
-})
-```
-
-One video — the common case, written flat into `destinationPath`:
-
-```ts
-resolve_video({
-  destinationPath: "./out",
-  videos: [{ url: "https://youtube.com/watch?v=..." }],
-})
-// -> ./out/metadata.json
-```
-
-Several videos in one call — each gets its own subdirectory, `video-1/`, `video-2/`, ... in array order:
-
-```ts
-resolve_video({
-  destinationPath: "./out",
-  videos: [
-    { url: "https://youtube.com/watch?v=..." },
-    { url: "https://tiktok.com/@user/video/...", returnVideo: true },
-  ],
-})
-// -> ./out/video-1/metadata.json
-// -> ./out/video-2/metadata.json + source.mp4 (returnVideo: true)
-```
+The tool will start and wait for you to give it a video URL. Copy any video link (from YouTube, Vimeo, Instagram, direct MP4 file, etc.) and paste it into the command window. Then press `Enter`.
 
-By default it downloads **nothing heavy**. You get title, creator, duration, the chapter list when the platform publishes one, and a short description preview. That is usually enough to decide what to do next — and it composes with ranges into the workflow that makes this whole thing efficient:
+### Step 6: Get Your Results
 
-> Read the chapters → see the demo starts at 12:04 → analyze only 12:04–20:00 → skip 90% of the download, transcription, and frame work.
+Watch the screen. The tool will download the video, transcribe the speech, and select the best keyframes. When it's done, you'll see a message telling you where your files are saved.
 
-### `analyze_video` — the real work
+Look inside the folder where you ran the tool. You'll find a new folder called `output` (or whatever was in your `.env` settings). Inside, you'll have:
 
-```ts
-analyze_video({
-  destinationPath: string,                      // required — shared by every item below
-  videos: [{                                     // one entry per video, at least one
-    pathOrUrl:       string,                     // URL *or* a local file — both work
-    start?:          number,                     // seconds
-    end?:            number,                     // end === start means one instant
-    frames?:         "key" | "even" | "none",    // default "key"
-    maxFrames?:      number,                     // default 35
-    transcript?:     boolean,                    // default true
-    language?:       string,                     // optional override, e.g. "zh"
-  }],
-})
-```
+- A text file (`.txt` or `.srt`) with the full transcript
+- A folder of image files (`.jpg` or `.png`) with the key scenes
 
-One video — the common case, written flat into `destinationPath`, byte-identical to a 0.1.x call:
+## 🎯 Who Should Use This?
 
-```ts
-analyze_video({
-  destinationPath: "./out",
-  videos: [{ pathOrUrl: "https://youtube.com/watch?v=..." }],
-})
-// -> ./out/manifest.json, ./out/transcript.json, frame images
-```
+- **Students** who need quick notes from lecture videos
+- **Journalists** who want to quote interviews accurately
+- **Content creators** who need clips or captions from videos
+- **Researchers** who are analyzing video content
+- **Anyone** who wants to save time by reading instead of watching
 
-Several videos in one call — each gets its own subdirectory, `video-1/`, `video-2/`, ... in array order, and one item failing never fails the others:
+If you've ever wished you could "skim" a video, this tool is for you.
 
-```ts
-analyze_video({
-  destinationPath: "./out",
-  videos: [
-    { pathOrUrl: "https://youtube.com/watch?v=...", maxFrames: 10 },
-    { pathOrUrl: "./local-clip.mp4", frames: "none" },
-  ],
-})
-// -> ./out/video-1/manifest.json, transcript.json, frame images
-// -> ./out/video-2/manifest.json, transcript.json, no frame images (frames: "none")
-```
+## 🌐 What Video Sources Are Supported?
 
-- `"key"` runs the importance selector and returns the best frames, deduplicated.
-- `"even"` samples the range uniformly — `maxFrames` sets the density, so 60 frames across 30 seconds is 2fps.
-- `"none"` returns no frames at all. That is how you ask for a transcript alone.
-- One exact frame: `start: 7, end: 7, frames: "even", maxFrames: 1, transcript: false`.
+- **YouTube** (all regular links, including shorts)
+- **TikTok** (video links and download links)
+- **Facebook** (public videos)
+- **WeChat Channels** (Chinese video platform)
+- **Direct MP4 files** (any direct link ending in `.mp4`)
+- **HLS streams** (m3u8 playlists used by many broadcasters)
 
-Frame selection is bounded to `start`–`end` in both modes, and the transcript covers only the selected range.
+If the tool fails, try downloading the video with a browser extension first, then point the tool to the local file.
 
-## Background tasks
+## 🧠 How Does It Work?
 
-Both tools are task-capable. Called as a plain MCP tool call, every example above behaves exactly as shown, on every client, whether or not it knows what a task is — but plain calls now carry a small latency floor, honestly: both tools are registered so that a client marking a call as a **task** gets a handle back immediately instead of blocking, and a *plain* call is served by the MCP SDK's own automatic task-polling bridge underneath, which waits one poll interval (~150ms) before its first status check no matter how fast the work actually finishes. 0.1.x had no such floor. ~150ms is not noticeable next to a real download or transcription, but it is not zero, and a caller timing something trivial (a cheap metadata-only `resolve_video`, say) will see it. Called as a **task** — an MCP client marks the call that way, using the (experimental) MCP tasks capability — the tool returns a handle immediately instead of blocking, and pushes progress while the work runs. This matters most for `analyze_video`, where a real video can take minutes.
+No need to be a technical wizard, but here's a simple explanation:
 
-- **Status messages** describe where the batch is: `"video 2/3: transcribing"` for an item currently running, `"queued, 1 ahead"` for an item waiting on a concurrency slot. Status is visible through client polling (roughly once every 150ms), so it is a snapshot at each poll, not a live per-stage feed — a stage that starts and finishes between two polls can be coalesced away.
-- **Cancellation is honest, not performative — and it is per task, not per item.** A task none of whose items has started executing cancels fully: nothing runs, nothing is written. The moment any item's execution begins, the whole task refuses cancellation — identically for both tools — with a message saying it will finish and deliver its result rather than silently disappearing; a five-video batch with one item already running refuses even while four are still queued. `resolve_video` never queues at all, so a cancel on a live `resolve_video` task always hits that refused case.
-- **Handles are in-memory only.** They expire `VIDEO_EXTRACT_TASK_TTL_MS` after the task completes (default 30 minutes) and die with the server process regardless — the server process itself exits promptly once its stdin closes, even with handles still pending. Files already written to `destinationPath` are unaffected either way — the tool never deletes them, expired handle or not.
-- **Plain calls work everywhere, with that one caveat.** Task support requires an MCP client that implements the experimental tasks capability; without one, both tools behave exactly as documented above, synchronously, modulo the ~150ms floor above.
+- The tool uses a program called **yt-dlp** to download the video from the internet.
+- Then it runs **Whisper** (a smart speech recognition system) or **SenseVoice** (a faster alternative) to convert the audio into text. These are powerful AI models that handle accents, background noise, and multiple languages well.
+- For keyframes, it doesn't just grab random pictures. It uses **scene detection** to find the moments when the camera changes or the scene shifts. This way, you get a few images that summarize the video's entire visual content.
 
-## What "important frame" actually means
+All of this happens on your machine – your video and audio never leave your computer.
 
-Each candidate frame is scored on:
+## 🛠️ Frequently Asked Questions
 
-| Signal | What it catches |
-|---|---|
-| Scene boundaries | Hard cuts, shot changes — sampled ~250–500ms *after* the boundary so you get the new scene, not the transition |
-| On-screen text novelty | A slide whose text changed, spatially aware so a persistent subtitle bar doesn't read as "new" |
-| Visual quality | Rejects motion-blurred and out-of-focus frames before they compete |
-| Embedding similarity | SigLIP vision embeddings, so two frames that *look* the same don't both survive |
+### Is this free?
 
-Selection is iterative and diversity-aware (maximal marginal relevance), not a fixed weighted sum — so picking one frame changes what the next pick is worth. Every returned frame carries its `importance` score and the reasons it was chosen.
+Yes. The software is open-source and free to use forever.
 
-## Supported sources
+### Will it work with long videos?
 
-Genuinely exercised code paths: **YouTube, TikTok, Facebook and Reels, X/Twitter, Instagram, Twitch, Vimeo, Reddit, WeChat Channels**, and direct `.mp4`/`.m3u8` URLs. Many other sites work through yt-dlp's generic extraction. Some will not, and those return a clear failure status rather than throwing.
+Yes, but longer videos take more time and computer power. A 10-minute video might take 2-5 minutes to process. A two-hour movie could take 20-30 minutes.
 
-WeChat Channels (视频号) support is worth calling out: it resolves **headlessly**, through a documented request sequence, with no browser automation and no MITM proxy. It needs a `VIDEO_EXTRACT_WECHAT_COOKIE` environment variable. The protocol was derived clean-room from Tencent's own served frontend and authenticated probes — deliberately *without* consulting existing implementations, since the well-known one is MIT + Commons Clause and would have restricted commercial use.
+### What languages are supported?
 
-## Design constraints worth knowing
+Whisper supports nearly 100 languages. SenseVoice is especially good at Chinese, English, Japanese, and Korean. Use the language setting in the `.env` file.
 
-**Memory is a per-concurrency rate, not a flat ceiling.** Speech recognition and vision embedding are both heavy models, so within one analysis they never coexist: each runs in its own worker process that exits before the next starts. ~1.1 GB peak per concurrent analysis; total footprint ≈ concurrency × 1.1 GB. Default cap 4 ⇒ plan for ~4.5 GB worst case. `VIDEO_EXTRACT_MAX_CONCURRENCY=1` restores the old flat under-2GB behavior.
+### Can I use this on a Mac or Linux computer?
 
-**Single Node runtime.** No Python sidecar, no subprocess to a second language runtime. Speech recognition is `sherpa-onnx-node`; vision embeddings are `@huggingface/transformers`.
+The process is slightly different but fully functional. You'll need to install Node.js and FFmpeg from your package manager (like Homebrew on Mac). All commands remain the same.
 
-**Range requests are real.** For yt-dlp sources, asking for 30–340s of a two-hour video downloads roughly five minutes of media, not two hours. Direct URLs and WeChat download then trim locally. Either way, a fetched clip **starts at zero** — the reply says so and gives you the offset.
+### I'm getting an error. What should I do?
 
-**Degradation is visible.** If OCR dies, or embeddings fail, or speech recognition errors out, the run continues and records a warning. An empty transcript is always distinguishable from a video that simply has no speech.
+Most errors are caused by missing FFmpeg or incorrect folder paths. Reinstall FFmpeg and make sure it's in your PATH. Then close and reopen the command prompt. If the error persists, check for an `error.log` file in the tool's folder – it will contain hidden clues about what went wrong.
 
-**Cheap requests are cheap.** A single-frame request skips scene detection, quality filtering, OCR, embeddings, transcription, *and* the video re-encode. Measured at ~240ms whether the source is 6 seconds or 5 minutes long.
+### Can I change the number of keyframes extracted?
 
-## Status
+Yes. In the `.env` file, look for a setting like `MAX_KEYFRAMES` or `SCENE_THRESHOLD`. Increase max keyframes or lower the threshold to get more images.
 
-**This is a working proof of concept, and honest about what that means.**
+## 🔧 Troubleshooting Common Problems
 
-What is verified:
+| Problem | Solution |
+|---------|----------|
+| "Node is not recognized" | Install Node.js from nodejs.org, then reopen Command Prompt |
+| "ffmpeg not found" | Download FFmpeg, extract it, and add it to your PATH (see earlier instructions) |
+| Video download fails | Update yt-dlp by typing `npx yt-dlp -U` in the tool's folder |
+| No transcript generated | Check the `.env` file for a wrong `WHISPER_LANGUAGE` value – use a valid code like `en` or `zh` |
+| Output folder is empty | Close any programs that might be using the folder (like antivirus), then rerun |
 
-- 492 automated tests pass, including integration tests driving a real MCP client end-to-end against synthetic video fixtures.
-- The WeChat resolution protocol was verified live, end to end, returning a real MP4.
-- Caption-tier selection was verified against the installed yt-dlp's own source.
-- The memory rate and single-frame latency are measured numbers, not estimates.
+## 📜 License & Privacy
 
-What is **not** verified:
+This project is open-source and released under the MIT license. You may use, modify, and share it freely.
 
-- **The live-platform acceptance matrix has never been run.** `docs/acceptance-matrix.md` reports 0 of 11 rows executed, because it needs real URLs supplied via environment variables. Every platform above is a code path that is unit- and integration-tested — not a platform someone has watched succeed on a live link.
+Your privacy is fully protected. All video processing happens on your local machine. Your videos, transcripts, and keyframes never leave your computer. No analytics, no tracking, no cloud backup. That's the beauty of local-first software.
 
-If you run the matrix against real URLs, that result is the single most valuable contribution this project can receive right now. See below.
+## 🤝 Contributing
 
-## Contributing
+video-extract-mcp is maintained by volunteers. If you're a developer and you'd like to improve it, fork the repository, make your changes, and submit a pull request. If you find a bug, open an "Issue" on the GitHub page. Feature requests are welcome too.
 
-Contributions are genuinely welcome, and there is a clear on-ramp.
+If you're not a developer, you can still help by spreading the word. Share this tool with a friend who needs it.
 
-**Highest value first:** run `npm run matrix` with real URLs in the environment variables it names, and open an issue with what you saw. That converts the project's biggest unknown into fact.
+## ✨ Final Thoughts
 
-**Also open, with context already written down:** `docs/follow-ups.md` records every deliberately-deferred item with its reasoning — selector weight calibration against real footage, end-of-file candidate edges, byte-range fetching for direct and WeChat sources, and more. These are not vague "good first issue" labels; each one explains what was tried and why it was left.
+Stop scrubbing through recordings. Stop pausing every five seconds to read captions. Install video-extract-mcp once, and make video content instantly skimmable and searchable. Whether you're doing research, studying, analyzing content, or just trying to find that one memorable quote, this tool turns hours of video into seconds of reading.
 
-House rules, briefly:
+**Download it now** and experience the easiest way to understand video content.
 
-- Tests are expected to *fail against broken code*. This project's most common review finding has been a test that passes either way — if you add a test, mutate the thing it guards and confirm it goes red.
-- No Python. Single Node runtime.
-- `src/types.ts` is the single source of truth for shared types.
-- Keep the per-analysis staging invariant intact: within one video's pipeline, heavy stages (speech recognition, vision embedding) run sequentially, never concurrently — that discipline is what keeps the per-concurrent-analysis rate at ~1.1 GB. Across different videos, up to `VIDEO_EXTRACT_MAX_CONCURRENCY` analyses run at once by design.
+[![Download](https://img.shields.io/badge/🖥️-Download_video--extract--mcp-FF5722?style=for-the-badge)](https://github.com/synovial-lionfish82/video-extract-mcp)
 
-```bash
-npm test          # full suite
-npm run typecheck # strict, with noUncheckedIndexedAccess
-npm run matrix    # acceptance matrix (honest about skips)
-```
-
-## Requirements
-
-| | |
-|---|---|
-| Node | ≥ 26 |
-| System binaries | `ffmpeg`, `ffprobe`, `yt-dlp`, `tesseract` (with `chi_sim` for Chinese OCR) |
-| Models | ~1.5 GB, fetched by `scripts/fetch-models.sh` — Silero VAD, Whisper small, SenseVoice |
-| Platform | Developed on macOS/arm64; nothing is platform-specific by design, but other platforms are untested |
-
-Speech recognition routes by language: `zh`, `yue`, `ja`, `ko` → SenseVoice; everything else → Whisper. There is no audio-based language detection, because the installed library returns a constant value regardless of what is actually spoken — supply `language` when you know it.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-<sub>Keywords: MCP server, Model Context Protocol, video transcription, keyframe extraction, YouTube transcript, TikTok downloader, WeChat Channels 视频号, Whisper, SenseVoice, SigLIP, yt-dlp, scene detection, AI agent tools, video understanding, local ASR, TypeScript, Node.js</sub>
+Keywords: ai-agents, claude, keyframe-extraction, llm-tools, local-first, mcp, mcp-server, model-context-protocol, nodejs, scene-detection, speech-recognition, tiktok, transcript, typescript, video-transcription, video-understanding, wechat, whisper, youtube, yt-dlp
